@@ -19,12 +19,15 @@
 --->
 
 ## Upcoming Release
+* Added new cmdlets to create packet captures for Network Watcher:
+    - `New-AzNetworkWatcherPacketCaptureV2`
+    - `New-AzPacketCaptureScopeConfig`
 * Added new cmdlets to create/manage authorization objects for ExpressRoutePort:
     - `Add-AzExpressRoutePortAuthorization`
     - `Get-AzExpressRoutePortAuthorization`
     - `Remove-AzExpressRoutePortAuthorization`
 * Added option parameter `AuthorizationKey` to cmdlet `New-AzExpressRouteCircuit` to allow creating ExpressRoute Circuit on a ExpressRoutePort with a different owner.
-* Fix bug that can't display CustomIpPrefix in PublicIpPrefix.
+* Fixed bug that can't display CustomIpPrefix in PublicIpPrefix.
 * Updated cmdlets to add new property of `HubRoutingPreference` in VirtualHub and set property of `PreferredRoutingGateway` deprecated .
     - `New-AzVirtualHub`
     - `Update-AzVirtualHub`
@@ -40,6 +43,10 @@
     - `New-AzVpnServerConfigurationPolicyGroup`
     - `Update-AzVpnServerConfigurationPolicyGroup`
     - `Remove-AzVpnServerConfigurationPolicyGroup`
+* Added support for CustomV2 ssl policies for Application Gateway.
+    - Added `CustomV2` to the validation set of `PolicyType`
+    - Added `TLSv1_3` to the validation set of `MinProtocolVersion`
+    - Removed validation for null or empty cipher suites list since there can be empty cipher suites list for min protocol version of tls1.3
 * Updated cmdlets to add new option of `HubRoutingPreference` in RouteServer.
     - `New-AzRouteServer`
     - `Update-AzRouteServer`
