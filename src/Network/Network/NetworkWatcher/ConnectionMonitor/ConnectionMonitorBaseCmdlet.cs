@@ -522,13 +522,21 @@ namespace Microsoft.Azure.Commands.Network
                 throw new PSArgumentException(Properties.Resources.ConnectionMonitorEndpointMustHaveName);
             }
 
-            if (string.IsNullOrEmpty(endpoint.ResourceId) && string.IsNullOrEmpty(endpoint.Address))
-            {
-                throw new PSArgumentException(Properties.Resources.MissedPropertiesInConnectionMonitorEndpoint);
-            }
-
             this.ValidateEndpointType(endpoint);
-            this.ValidateEndpointResourceId(endpoint);
+
+            if (endpoint.Type == EndpointType.AzureArcNetwork)
+            {
+                this.ValidateAzureArcNetworkEndpoint(endpoint);
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(endpoint.ResourceId) && string.IsNullOrEmpty(endpoint.Address))
+                {
+                    throw new PSArgumentException(Properties.Resources.MissedPropertiesInConnectionMonitorEndpoint);
+                }
+
+                this.ValidateEndpointResourceId(endpoint);
+            }
         }
 
         public void ValidateTestConfiguration(PSNetworkWatcherConnectionMonitorTestConfigurationObject testConfiguration)
@@ -596,6 +604,51 @@ namespace Microsoft.Azure.Commands.Network
                 if (!destinationEndpointNames.Add(endpoint.Name))
                 {
                     throw new PSArgumentException(Properties.Resources.ConnectionMonitorDestinationEndpointNamesMustBeUnique);
+                }
+            }
+        }
+
+        public void ValidateAzureArcNetworkEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint)
+        {
+            if (string.IsNullOrEmpty(endpoint.Name))
+            {
+                throw new PSArgumentException(Properties.Resources.ConnectionMonitorEndpointMustHaveName);
+            }
+
+            if (!string.IsNullOrEmpty(endpoint.ResourceId))
+            {
+                throw new PSArgumentException(string.Format(Properties.Resources.ResourceIDNotSupportedInAzureArcNetworkEndpoint, endpoint.Name));
+            }
+
+            if (string.IsNullOrEmpty(endpoint.SubscriptionId))
+            {
+                throw new PSArgumentException(string.Format(Properties.Resources.AzureArcNetworkEndpointMustHaveSubscriptionId, endpoint.Name));
+            }
+
+            if (endpoint.LocationDetails == null || endpoint.LocationDetails.Region == null)
+            {
+                throw new PSArgumentException(string.Format(Properties.Resources.RegionNotSpecifiedInAzureArcNetworkEndpoint, endpoint.Name));
+            }
+
+            if (endpoint.Scope.Include.Any() != true)
+            {
+                throw new PSArgumentException(string.Format(Properties.Resources.AzureArcNetworkEndpointMissingScope, endpoint.Name));
+            }
+
+            IEnumerable<string> includedSubnetMasks = endpoint.Scope.Include.Select(i => i.Address).Where(entry => !string.IsNullOrEmpty(entry));
+            if (includedSubnetMasks?.Any() != true)
+            {
+                throw new PSArgumentException(string.Format(Properties.Resources.InvalidScopeinAzureArcNetworkEndpoint, endpoint.Name));
+            }
+
+            if (endpoint.Scope.Exclude?.Any() == true)
+            {
+                foreach (var item in endpoint.Scope.Exclude)
+                {
+                    if (!IPAddress.TryParse(item.Address, out IPAddress ipAddress))
+                    {
+                        throw new PSArgumentException(string.Format(Properties.Resources.InvalidScopeinAzureArcNetworkEndpoint, endpoint.Name));
+                    }
                 }
             }
         }
@@ -803,7 +856,8 @@ namespace Microsoft.Azure.Commands.Network
             if (!string.Equals(endpoint.Type, "AzureVM", StringComparison.OrdinalIgnoreCase) && !string.Equals(endpoint.Type, "AzureVNet", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(endpoint.Type, "AzureSubnet", StringComparison.OrdinalIgnoreCase) && !string.Equals(endpoint.Type, "MMAWorkspaceMachine", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(endpoint.Type, "MMAWorkspaceNetwork", StringComparison.OrdinalIgnoreCase) && !string.Equals(endpoint.Type, "ExternalAddress", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(endpoint.Type, "AzureVMSS", StringComparison.OrdinalIgnoreCase) && !string.Equals(endpoint.Type, "AzureArcVM", StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(endpoint.Type, "AzureVMSS", StringComparison.OrdinalIgnoreCase) && !string.Equals(endpoint.Type, "AzureArcVM", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(endpoint.Type, "AzureArcNetwork", StringComparison.OrdinalIgnoreCase))
             {
                 throw new PSArgumentException(Properties.Resources.InvalidEndpointType, endpoint.Name);
             }
@@ -868,7 +922,7 @@ namespace Microsoft.Azure.Commands.Network
                     throw new PSArgumentException(Properties.Resources.InvalidEndpointResourceIdForSpecifiedType, endpoint.Type);
                 }
             }
-            else if (string.Equals(endpoint.Type, "AzureArcVM", StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(endpoint.Type, "AzureArcVM", StringComparison.OrdinalIgnoreCase) || string.Equals(endpoint.Type, "AzureArcNetwork", StringComparison.OrdinalIgnoreCase))
             {
                 if (!resourceType.Equals("machines", StringComparison.OrdinalIgnoreCase))
                 {
@@ -947,7 +1001,10 @@ namespace Microsoft.Azure.Commands.Network
                     Type = sourceEndpoint.Type,
                     ResourceId = sourceEndpoint.ResourceId,
                     Address = sourceEndpoint.Address,
-                    CoverageLevel = sourceEndpoint.CoverageLevel
+                    CoverageLevel = sourceEndpoint.CoverageLevel,
+                    LocationDetails = sourceEndpoint.Type == EndpointType.AzureArcNetwork ?
+                    new MNM.ConnectionMonitorEndPointLocationDetails { Region = sourceEndpoint?.LocationDetails?.Region } : null,
+                    SubscriptionId = sourceEndpoint.SubscriptionId,
                 };
 
                 // Add ConnectionMonitorEndpointScope
@@ -1025,7 +1082,10 @@ namespace Microsoft.Azure.Commands.Network
                     Type = destinationEndpoint.Type,
                     ResourceId = destinationEndpoint.ResourceId,
                     Address = destinationEndpoint.Address,
-                    CoverageLevel = destinationEndpoint.CoverageLevel
+                    CoverageLevel = destinationEndpoint.CoverageLevel,
+                    LocationDetails = destinationEndpoint.Type == EndpointType.AzureArcNetwork ?
+                    new ConnectionMonitorEndPointLocationDetails { Region = destinationEndpoint?.LocationDetails?.Region } : null,
+                    SubscriptionId = destinationEndpoint.SubscriptionId
                 };
 
                 // Add ConnectionMonitorEndpointScope

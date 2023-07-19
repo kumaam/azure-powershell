@@ -10,6 +10,10 @@
     <AssemblyName>Microsoft.Azure.PowerShell.TestFx</AssemblyName>
     <RootNamespace>$(LegacyAssemblyPrefix)TestFx</RootNamespace>
   </PropertyGroup>
+  
+  <PropertyGroup>
+    <NoWarn>NU1903</NoWarn>
+  </PropertyGroup>
 
   <ItemGroup>
     <Content Include="Assert.ps1">
