@@ -62,6 +62,8 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             if (MMAWorkspaceConnectionMonitors?.Count() > 0)
             {
                 var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+
+                var cmWithArmEndpoints1 = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
                 List<ConnectionMonitorResult> outputCMs = cmWithArmEndpoints?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
 
                 if (outputCMs != null && outputCMs.Count > 0)
