@@ -429,7 +429,6 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             Dictionary<string, string> arcMachineToRegion = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            // TODO - fetch all regions of ARC machines and update arcMachineToRegion dictionary.
             IEnumerable<GenericResource> arcGenericResources = GetResourcesById(arcMachines);
             arcGenericResources.ToList().ForEach(arcMachine =>
             {
@@ -453,18 +452,26 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                         endointsNotConverted.Add(endpoint.ResourceId);
 
                     List<NetworkAgentDetails> arcDetails = new List<NetworkAgentDetails>();
-                    if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+                if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+                {
+                    arcmMachineDetails.TryGetValue(endpoint.ResourceId, out arcDetails);
+                    // arcDetails = arcmMachineDetails[endpoint.ResourceId];
+                    // TODO this check is needed, add this check back.
+                    // Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
+                }
+                else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope.Include)
                     {
-                        arcDetails = arcmMachineDetails[endpoint.ResourceId];
-                        // TODO this check is needed, add this check back.
-                        // Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
-                    }
-                    else if(endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    {
-                        arcDetails = arcmMachineDetails[endpoint.ResourceId].Where(arc => endpoint?.Scope?.Include?.Equals(arc.SubnetId) ?? false).ToList();
+                        string subnetAddress = item.Address;
+                        arcmMachineDetails.TryGetValue(endpoint.ResourceId, out var arcDetailsTemp);
+                        arcDetails = arcDetailsTemp?.Where(arc => subnetAddress?.Equals(arc.SubnetId, StringComparison.OrdinalIgnoreCase) ?? false)?.ToList();
+                        if (arcDetails?.Any() ?? false)
+                                break;
+                        }
                     }
                     
-                    if (!arcDetails.Any())
+                    if (!arcDetails?.Any() ?? true)
                         endointsNotConverted.Add(endpoint.ResourceId);
                 });
 
@@ -484,7 +491,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                             if (!regionalEndpoints.ContainsKey(region))
                                 regionalEndpoints.Add(region, new List<string>());
 
-                            if (!regionalEndpoints[region].Contains(s.Name))
+                            if (!regionalEndpoints[region]?.Contains(s.Name) ?? false)
                                 regionalEndpoints[region].Add(s.Name);
                         });
                     }));
@@ -510,7 +517,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                         }
 
 
-                        foreach (var endpoint in newCM.Endpoints)
+                        foreach (var endpoint in cm.Endpoints)
                         {
                             // Remove endpoints from test groups if they are not part of this region. Later we'll update the test-groups for parity.
                             if (!regionalEndpoint.Value.Contains(endpoint.Name))
@@ -526,26 +533,122 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                             if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                             {
                                 // Changing the endpoint type to AzureArcVM, only type + resourceId needs to be changed.
-                                endpoint.Type = CommonConstants.AzureArcVMType;
-                                endpoint.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                newCM.Endpoints.Where(s => s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase)).ForEach(
+                                    ep =>
+                                    {
+                                        ep.Type = CommonConstants.AzureArcVMType;
+                                        ep.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                    });
+
                                 // TODO endpoint.ResourceId = arcmMachineDetails[endpoint.ResourceId].Where(arc => endpoint.Address.Equals(arc.AgentIP)).FirstOrDefault().ResourceId;
+                                newCM.TestGroups.ForEach(tg =>
+                                {
+                                    tg.Sources.ForEach(s =>
+                                    {
+                                        if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
+                                        {
+                                            s.Type = CommonConstants.AzureArcVMType;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                        }
+                                    });
+
+                                    tg.Destinations.ForEach(s =>
+                                    {
+                                        if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
+                                        {
+                                            s.Type = CommonConstants.AzureArcVMType;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                        }
+                                    });
+                                });
                             }
 
-                            // ARCNetwork support is not there in PS.
                             else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                             {
+                                List<string> ipsNotCovered = new List<string>();
+                                Dictionary<string, List<string>> arcIdToAddressList = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                                foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope.Include)
+                                {
+                                    string subnetAddress = item.Address;
+                                    var arcDetails = arcmMachineDetails[endpoint.ResourceId].Where(arc => subnetAddress?.Equals(arc.SubnetId, StringComparison.OrdinalIgnoreCase) ?? false).FirstOrDefault();
+
+                                    if (arcDetails == null)
+                                    {
+                                        ipsNotCovered.Add(subnetAddress);
+                                        continue;
+                                    }
+                                    else
+                                    {
+                                        if (!arcIdToAddressList.ContainsKey(arcDetails.ResourceId))
+                                            arcIdToAddressList.Add(arcDetails.ResourceId, new List<string>());
+
+                                        arcIdToAddressList[arcDetails.ResourceId].Add(subnetAddress);
+                                    }
+                                }
+                                Console.WriteLine($"CM {cm.Name}, endpoint {endpoint.Name} has few IPs on Include scope, which won't be converted to ArcNetwork. Ips not covered - {string.Join(",", ipsNotCovered)}");
+
+                                bool sameEndpoint = true;
+                                int endpointIteration = 0;
+                                List<PSNetworkWatcherConnectionMonitorEndpointObject> updatedEndpoints = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
+                                foreach (var arcIdToAddress in arcIdToAddressList)
+                                {
+                                    PSNetworkWatcherConnectionMonitorEndpointObject newEndpoint = endpoint.Copy();
+                                    if (!sameEndpoint)
+                                    {
+                                        newEndpoint.Name = newEndpoint.Name + "_" + endpointIteration;
+                                    }
+                                    newEndpoint.ResourceId = null;
+                                    newEndpoint.Type = CommonConstants.AzureArcNetworkType;
+                                    newEndpoint.SubscriptionId = this.DefaultContext.Subscription.Id; // TODO : change it to ArcSubsKey
+                                    newEndpoint.LocationDetails = new PSConnectionMonitorEndPointLocationDetails()
+                                    {
+                                        Region = arcMachineToRegion[arcIdToAddress.Key]
+                                    };
+                                    newEndpoint.Scope = new PSNetworkWatcherConnectionMonitorEndpointScope()
+                                    {
+                                        Include = new List<PSNetworkWatcherConnectionMonitorEndpointScopeItem>()
+                                    };
+                                    
+                                    arcIdToAddress.Value.ForEach(address =>
+                                    {
+                                        newEndpoint.Scope.Include.Add(new PSNetworkWatcherConnectionMonitorEndpointScopeItem()
+                                        {
+                                            Address = address
+                                        });
+                                    });
+
+                                    updatedEndpoints.Add(newEndpoint);
+
+                                    sameEndpoint = false;
+                                    ++endpointIteration;
+                                }
+
+                                foreach (var tg in newCM.TestGroups)
+                                {
+                                    if (tg.Sources.Any(s => s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase)))
+                                    {
+                                        var sourcesToBeUpdated = tg.Sources.Where(s => !s.Name.Equals(endpoint.Name, StringComparison.OrdinalIgnoreCase)).ToList();
+                                        sourcesToBeUpdated.AddRange(updatedEndpoints);
+                                        tg.Sources = sourcesToBeUpdated;
+                                    }
+
+                                    else if (tg.Destinations.Any(s => s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase)))
+                                    {
+                                        var destinationsToBeUpdated = tg.Destinations.Except(new List<PSNetworkWatcherConnectionMonitorEndpointObject>() { endpoint }).ToList();
+                                        destinationsToBeUpdated.AddRange(updatedEndpoints);
+                                        tg.Destinations = destinationsToBeUpdated;
+                                    }
+                                }
+
+                                var endpointsToBeUpdated = newCM.Endpoints.Where(s => !s.Name.Equals(endpoint.Name, StringComparison.OrdinalIgnoreCase)).ToList();
+                                endpointsToBeUpdated.AddRange(updatedEndpoints);
+                                newCM.Endpoints = endpointsToBeUpdated;
                             }
                         }
 
                         //cm.Endpoints might have unused endpoints, remove them. For every endpoint in cm.Endpoints, check if it exists in cm.Sources/destination, if not remove it.
-
-                        var tgsToRemove = new List<PSNetworkWatcherConnectionMonitorTestGroupObject>();
-                        newCM.TestGroups.ForEach(tg =>
-                        {
-                            if (!tg.Sources.Any())
-                                tgsToRemove.Add(tg);
-                        });
-                        newCM.TestGroups = newCM.TestGroups.Except(tgsToRemove).ToList();
+                        EndpointsCleanup(newCM);
+                        TestGroupsCleanup(newCM);
 
                         updatedCMs.Add(newCM);
                         sameCM = false;
@@ -554,7 +657,44 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
             });
 
+            notUpdatedCMs.ForEach(cm =>
+            {
+                Console.WriteLine($"Not Updating this CM as corresponding Arc servers are not found - {cm.Name}");
+            });
+
             return updatedCMs;
+        }
+
+        private void EndpointsCleanup(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm)
+        {
+            var endpointsToReplace = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
+            cm.TestGroups.ForEach(tg =>
+            {
+                tg.Sources.ForEach(ss =>
+                {
+                    if (!endpointsToReplace.Any(ep => ep.Name.Equals(ss.Name, StringComparison.OrdinalIgnoreCase)))
+                        endpointsToReplace.Add(ss);
+                });
+
+                tg.Destinations.ForEach(ss =>
+                {
+                    if (!endpointsToReplace.Any(ep => ep.Name.Equals(ss.Name, StringComparison.OrdinalIgnoreCase)))
+                        endpointsToReplace.Add(ss);
+                });
+            });
+
+            cm.Endpoints = endpointsToReplace;
+        }
+
+        private void TestGroupsCleanup(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor newCM)
+        {
+            var tgsToRemove = new List<PSNetworkWatcherConnectionMonitorTestGroupObject>();
+            newCM.TestGroups.ForEach(tg =>
+            {
+                if (!tg.Sources.Any())
+                    tgsToRemove.Add(tg);
+            });
+            newCM.TestGroups = newCM.TestGroups.Except(tgsToRemove).ToList();
         }
 
         protected IEnumerable<GenericResource> GetResourcesById(IEnumerable<string> resourceIds)
@@ -871,7 +1011,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         {
             Dictionary<string, Azure.OperationalInsights.Models.QueryResults> response = await QueryForLaWorkSpaceNetworkAgentData1(allDistantCMEndpoints);
 
-            Dictionary<string, List<NetworkAgentDetails>> resultDictionary = new Dictionary<string, List<NetworkAgentDetails>>();
+            Dictionary<string, List<NetworkAgentDetails>> resultDictionary = new Dictionary<string, List<NetworkAgentDetails>>(StringComparer.OrdinalIgnoreCase);
 
             response = response.Where(data => data.Value.Results.Count() > 0).ToDictionary(data => data.Key, data => data.Value);
 
@@ -1157,7 +1297,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         private ResourceManagementClient _armClient;
 
         //private MemoryCache EndpointNetworkAgentCache = MemoryCache.Default;
-        Dictionary<string, Azure.OperationalInsights.Models.QueryResults> EndpointNetworkAgentCache = new Dictionary<string, Azure.OperationalInsights.Models.QueryResults>() { };
+        Dictionary<string, Azure.OperationalInsights.Models.QueryResults> EndpointNetworkAgentCache = new Dictionary<string, Azure.OperationalInsights.Models.QueryResults>(StringComparer.OrdinalIgnoreCase) { };
 
     }
 

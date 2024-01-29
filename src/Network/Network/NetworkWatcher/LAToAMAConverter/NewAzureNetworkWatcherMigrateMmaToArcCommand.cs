@@ -41,7 +41,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         public int TimespanInHrs { get; set; }
 
 
-        [Parameter(Mandatory = false, HelpMessage = "List of MMA machine connection monitor.")]
+        [Parameter(Mandatory = true, HelpMessage = "List of MMA machine connection monitor.")]
         [ValidateNotNullOrEmpty]
         public PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] MMAWorkspaceConnectionMonitors { get; set; }
 
@@ -59,16 +59,13 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     "The endpoint for the Azure Resource Manager service is not set. Please report this issue via GitHub or contact Microsoft customer support.");
             }
 
-            //TODO - update this condition
-            if (true) //MMAWorkspaceConnectionMonitors?.Count() >= 0)
+            if (MMAWorkspaceConnectionMonitors?.Count() >= 0)
             {
-                // var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
-                ////TODO -remove this, only for testing
-
-                     ////string cmrid = "/subscriptions/9cece3e3-0f7d-47ca-af0e-9772773f90b7/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_westcentralus/connectionMonitors/vakaranaWCUSCM";
-                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "NetworkWatcher_westcentralus", "VAKARANAWCUSCM1");
+                /*** var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "NetworkWatcher_eastus", "LA-AMA-MMANetwork-TCP-HTTP");
                 var cm1 = MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(cmcm);
                 MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 };
+                **/
 
                 var cmWithArmEndpoints = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
                 List<ConnectionMonitorResult> outputCMs = cmWithArmEndpoints?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
@@ -77,14 +74,16 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 {
                     var cmListGrpByLocation = outputCMs.GroupBy(g => new { g.Location })
                         ?.OrderByDescending(o => o.Key.Location)?.Select(s => s.ToList());
+
+                    List<string> outputTemplate = new List<string>();
                     foreach (var cmList in cmListGrpByLocation)
                     {
                         string template = ARMTemplateForConnectionMonitors(cmList);
-                        WriteInformation($" Template ------------------------------------------\n{template}\n\n", new string[] { "PSHOST" });
+                        outputTemplate.Add(template);
                     }
 
                     WriteInformation($"CM List with Migrated LA to AMA endpoints----\n", new string[] { "PSHOST" });
-                    WriteObject(cmWithArmEndpoints);
+                    WriteObject(outputTemplate);
                 }
                 else
                 {
@@ -123,9 +122,6 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             armt += "]}";
 
             // this armt is final template which directly can be used to deploy.
-            Console.WriteLine("writing without jtoken\n");
-            Console.WriteLine(armt);
-            Console.WriteLine("----------------------\n\n");
 
             return armt;
         }
