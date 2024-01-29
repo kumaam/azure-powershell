@@ -44,6 +44,8 @@ using Microsoft.Azure.Management.Monitor.Version2018_09_01.Models;
 using System.IO;
 using System.Runtime.Serialization.Formatters.Binary;
 using System.Management.Automation.Language;
+using System.Reflection;
+using Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter.ArrayExtensions;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
@@ -104,6 +106,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             }
 
             return genericCMResources;
+        }
+
+        protected ConnectionMonitorResult GetConnectionMonitorResult(string resourceGroupName, string name, string connectionMonitorName)
+        {
+            return this.ConnectionMonitors.Get(resourceGroupName, name, connectionMonitorName);
         }
 
         protected PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(ConnectionMonitorResult connectionMonitor)
@@ -411,16 +418,16 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         }
         protected async Task<List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>> MigrateCM(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
         {
-            var mmaEndpoints = mmaMachineCMs.Select(s => s.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
+            List<PSNetworkWatcherConnectionMonitorEndpointObject> mmaEndpoints = mmaMachineCMs.SelectMany(s => s.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
             || w.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))).ToList();
 
             // remove entries where arc machine details are not available
-            Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails = await FetchArcMachineDetails((IEnumerable<PSNetworkWatcherConnectionMonitorEndpointObject>)mmaEndpoints);
+            Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails = await FetchArcMachineDetails(mmaEndpoints.AsEnumerable());
 
             // fetch all ARC machines and now call ARM to get location of each machine.
             List<string> arcMachines = arcmMachineDetails.Values.SelectMany(s => s).Select(s => s.ResourceId).Distinct().ToList();
 
-            Dictionary<string, string> arcMachineToRegion = new Dictionary<string, string>();
+            Dictionary<string, string> arcMachineToRegion = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             // TODO - fetch all regions of ARC machines and update arcMachineToRegion dictionary.
             IEnumerable<GenericResource> arcGenericResources = GetResourcesById(arcMachines);
@@ -448,7 +455,9 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     List<NetworkAgentDetails> arcDetails = new List<NetworkAgentDetails>();
                     if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                     {
-                        arcDetails = arcmMachineDetails[endpoint.ResourceId].Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
+                        arcDetails = arcmMachineDetails[endpoint.ResourceId];
+                        // TODO this check is needed, add this check back.
+                        // Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
                     }
                     else if(endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                     {
@@ -466,7 +475,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
                 else
                 {
-                    Dictionary<string, List<string>> regionalEndpoints = new Dictionary<string, List<string>>();
+                    Dictionary<string, List<string>> regionalEndpoints = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                     cm.TestGroups.ForEach(tg => tg.Sources.ToList().ForEach(s =>
                     {
                         var regions = GetRegionOfEndpoint(s, cm.Location, arcmMachineDetails, arcMachineToRegion);
@@ -474,7 +483,9 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                         {
                             if (!regionalEndpoints.ContainsKey(region))
                                 regionalEndpoints.Add(region, new List<string>());
-                            regionalEndpoints[region].Add(s.Name);
+
+                            if (!regionalEndpoints[region].Contains(s.Name))
+                                regionalEndpoints[region].Add(s.Name);
                         });
                     }));
 
@@ -482,33 +493,42 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     // for 1st region - duplicate CM and update MMAMachine endpoints simply.
                     //                - update MMANetwork and needed, add more endpoind and update those in test groups
                     // for 2nd region - duplicate CM and perform same operation as above (tweak name a bit)
+                    //                - removes the MMAMachine or others endpoints which are already added in 1st region and corresponding testGroups.
 
                     bool sameCM = true;
                     int cmIteration = 0;
                     regionalEndpoints.ForEach(regionalEndpoint =>
                     {
-                        PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor newCM = cm.DeepClone<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>();
-                        if (!sameCM)
-                            newCM.Name = newCM.Name + "_" + cmIteration;
+                        PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor newCM = cm.Copy();
+                        //NetworkResourceManagerProfile.Mapper.Map<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>(cm);
 
                         newCM.Location = regionalEndpoint.Key;
+                        if (!sameCM)
+                        {
+                            newCM.Name = newCM.Name + "_" + cmIteration;
+                            newCM.Id = "/subscriptions/" + this.DefaultContext.Subscription.Id + "/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_" + newCM.Location + "/connectionMonitors/" + newCM.Name;
+                        }
+
 
                         foreach (var endpoint in newCM.Endpoints)
                         {
+                            // Remove endpoints from test groups if they are not part of this region. Later we'll update the test-groups for parity.
+                            if (!regionalEndpoint.Value.Contains(endpoint.Name))
+                            {
+                                newCM.TestGroups.ForEach(tg =>
+                                {
+                                    var sourcesToRemove = tg.Sources.Where(s => s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase)).ToList();
+                                    tg.Sources = tg.Sources.Except(sourcesToRemove).ToList();
+                                });
+                            }
+
+
                             if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                             {
                                 // Changing the endpoint type to AzureArcVM, only type + resourceId needs to be changed.
                                 endpoint.Type = CommonConstants.AzureArcVMType;
-                                endpoint.ResourceId = arcmMachineDetails[endpoint.ResourceId].Where(arc => endpoint.Address.Equals(arc.AgentIP)).FirstOrDefault().ResourceId;
-
-                                // Remove endpoints from test groups if they are not part of this region. Later we'll update the test-groups for parity.
-                                if (!regionalEndpoint.Value.Contains(endpoint.Name))
-                                {
-                                    newCM.TestGroups.ForEach(tg =>
-                                    {
-                                        tg.Sources.Where(s => s.Equals(endpoint.Name)).ForEach(ep => tg.Sources.Remove(ep));
-                                    });
-                                }
+                                endpoint.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                // TODO endpoint.ResourceId = arcmMachineDetails[endpoint.ResourceId].Where(arc => endpoint.Address.Equals(arc.AgentIP)).FirstOrDefault().ResourceId;
                             }
 
                             // ARCNetwork support is not there in PS.
@@ -517,24 +537,15 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                             }
                         }
 
-                        // If the CM is in new region, then remove the endpoints which are added in base CM region.
-                        if (!sameCM)
-                        {
-                            newCM.TestGroups.ForEach(tg => tg.Sources.ForEach(ss =>
-                            {
-                                if (!regionalEndpoint.Value.Contains(ss.Name))
-                                {
-                                    tg.Sources.Remove(ss);
-                                }
-                                
-                            }));
-                        }
+                        //cm.Endpoints might have unused endpoints, remove them. For every endpoint in cm.Endpoints, check if it exists in cm.Sources/destination, if not remove it.
 
+                        var tgsToRemove = new List<PSNetworkWatcherConnectionMonitorTestGroupObject>();
                         newCM.TestGroups.ForEach(tg =>
                         {
                             if (!tg.Sources.Any())
-                                newCM.TestGroups.Remove(tg);
+                                tgsToRemove.Add(tg);
                         });
+                        newCM.TestGroups = newCM.TestGroups.Except(tgsToRemove).ToList();
 
                         updatedCMs.Add(newCM);
                         sameCM = false;
@@ -552,7 +563,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             Parallel.ForEach(resourceIds, id =>
             {
                 //Need to check API Version
-                genericResources.Add(ArmClient.Resources.GetById(id, ""));
+                genericResources.Add(ArmClient.Resources.GetById(id, "2022-12-27"));
             });
 
             return genericResources;
@@ -560,7 +571,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
         private List<string> GetRegionOfEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint, string cmRegion, Dictionary<string, List<NetworkAgentDetails>> laToArcDetails, Dictionary<string, string> arcMachineToRegion)
         {
-            if (!endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase) || !endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+            if (!endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase) && !endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
             {
                 return new List<string> { cmRegion };
             }
@@ -571,7 +582,10 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 List<string> regions = new List<string>();
                 arcDetails.ForEach(s => {
                     arcMachineToRegion.TryGetValue(s, out string region);
-                    regions.Add(region);
+                    if (!regions.Contains(region))
+                    {
+                        regions.Add(region);
+                    }
                 });
 
                 return regions;
@@ -833,7 +847,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return getAllArcResourceDetails?.ToList();
         }
 
-        private Dictionary<string, Task<Azure.OperationalInsights.Models.QueryResults>> workSpaceArcDetails = new Dictionary<string, Task<Azure.OperationalInsights.Models.QueryResults>>();
+        private Dictionary<string, Task<Azure.OperationalInsights.Models.QueryResults>> workSpaceArcDetails = new Dictionary<string, Task<Azure.OperationalInsights.Models.QueryResults>>(StringComparer.OrdinalIgnoreCase);
         private async Task<Dictionary<string, Azure.OperationalInsights.Models.QueryResults>> QueryForLaWorkSpaceNetworkAgentData1(IEnumerable<PSNetworkWatcherConnectionMonitorEndpointObject> allDistantCMEndpoints)
         {
             IEnumerable<PSNetworkWatcherConnectionMonitorEndpointObject> endpointsGroupedBySubsAndRG = GetGroupedByDistinctEndpoints(allDistantCMEndpoints);
@@ -1147,16 +1161,126 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
     }
 
-    public static class Extension
+    public static class ObjectExtensions
     {
-        public static T DeepClone<T>(this T a)
+        private static readonly MethodInfo CloneMethod = typeof(Object).GetMethod("MemberwiseClone", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        public static bool IsPrimitive(this Type type)
         {
-            using (MemoryStream stream = new MemoryStream())
+            if (type == typeof(String)) return true;
+            return (type.IsValueType & type.IsPrimitive);
+        }
+
+        public static Object Copy(this Object originalObject)
+        {
+            return InternalCopy(originalObject, new Dictionary<Object, Object>(new ReferenceEqualityComparer()));
+        }
+        private static Object InternalCopy(Object originalObject, IDictionary<Object, Object> visited)
+        {
+            if (originalObject == null) return null;
+            var typeToReflect = originalObject.GetType();
+            if (IsPrimitive(typeToReflect)) return originalObject;
+            if (visited.ContainsKey(originalObject)) return visited[originalObject];
+            if (typeof(Delegate).IsAssignableFrom(typeToReflect)) return null;
+            var cloneObject = CloneMethod.Invoke(originalObject, null);
+            if (typeToReflect.IsArray)
             {
-                BinaryFormatter formatter = new BinaryFormatter();
-                formatter.Serialize(stream, a);
-                stream.Position = 0;
-                return (T)formatter.Deserialize(stream);
+                var arrayType = typeToReflect.GetElementType();
+                if (IsPrimitive(arrayType) == false)
+                {
+                    Array clonedArray = (Array)cloneObject;
+                    clonedArray.ForEach((array, indices) => array.SetValue(InternalCopy(clonedArray.GetValue(indices), visited), indices));
+                }
+
+            }
+            visited.Add(originalObject, cloneObject);
+            CopyFields(originalObject, visited, cloneObject, typeToReflect);
+            RecursiveCopyBaseTypePrivateFields(originalObject, visited, cloneObject, typeToReflect);
+            return cloneObject;
+        }
+
+        private static void RecursiveCopyBaseTypePrivateFields(object originalObject, IDictionary<object, object> visited, object cloneObject, Type typeToReflect)
+        {
+            if (typeToReflect.BaseType != null)
+            {
+                RecursiveCopyBaseTypePrivateFields(originalObject, visited, cloneObject, typeToReflect.BaseType);
+                CopyFields(originalObject, visited, cloneObject, typeToReflect.BaseType, BindingFlags.Instance | BindingFlags.NonPublic, info => info.IsPrivate);
+            }
+        }
+
+        private static void CopyFields(object originalObject, IDictionary<object, object> visited, object cloneObject, Type typeToReflect, BindingFlags bindingFlags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.FlattenHierarchy, Func<FieldInfo, bool> filter = null)
+        {
+            foreach (FieldInfo fieldInfo in typeToReflect.GetFields(bindingFlags))
+            {
+                if (filter != null && filter(fieldInfo) == false) continue;
+                if (IsPrimitive(fieldInfo.FieldType)) continue;
+                var originalFieldValue = fieldInfo.GetValue(originalObject);
+                var clonedFieldValue = InternalCopy(originalFieldValue, visited);
+                fieldInfo.SetValue(cloneObject, clonedFieldValue);
+            }
+        }
+        public static T Copy<T>(this T original)
+        {
+            return (T)Copy((Object)original);
+        }
+    }
+
+    public class ReferenceEqualityComparer : EqualityComparer<Object>
+    {
+        public override bool Equals(object x, object y)
+        {
+            return ReferenceEquals(x, y);
+        }
+        public override int GetHashCode(object obj)
+        {
+            if (obj == null) return 0;
+            return obj.GetHashCode();
+        }
+    }
+
+    namespace ArrayExtensions
+    {
+        public static class ArrayExtensions
+        {
+            public static void ForEach(this Array array, Action<Array, int[]> action)
+            {
+                if (array.LongLength == 0) return;
+                ArrayTraverse walker = new ArrayTraverse(array);
+                do action(array, walker.Position);
+                while (walker.Step());
+            }
+        }
+
+        internal class ArrayTraverse
+        {
+            public int[] Position;
+            private int[] maxLengths;
+
+            public ArrayTraverse(Array array)
+            {
+                maxLengths = new int[array.Rank];
+                for (int i = 0; i < array.Rank; ++i)
+                {
+                    maxLengths[i] = array.GetLength(i) - 1;
+                }
+                Position = new int[array.Rank];
+            }
+
+            public bool Step()
+            {
+                for (int i = 0; i < Position.Length; ++i)
+                {
+                    if (Position[i] < maxLengths[i])
+                    {
+                        Position[i]++;
+                        for (int j = 0; j < i; j++)
+                        {
+                            Position[j] = 0;
+                        }
+                        return true;
+                    }
+                }
+                return false;
             }
         }
     }

@@ -41,7 +41,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         public int TimespanInHrs { get; set; }
 
 
-        [Parameter(Mandatory = true, HelpMessage = "List of MMA machine connection monitor.")]
+        [Parameter(Mandatory = false, HelpMessage = "List of MMA machine connection monitor.")]
         [ValidateNotNullOrEmpty]
         public PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] MMAWorkspaceConnectionMonitors { get; set; }
 
@@ -59,11 +59,18 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     "The endpoint for the Azure Resource Manager service is not set. Please report this issue via GitHub or contact Microsoft customer support.");
             }
 
-            if (MMAWorkspaceConnectionMonitors?.Count() > 0)
+            //TODO - update this condition
+            if (true) //MMAWorkspaceConnectionMonitors?.Count() >= 0)
             {
-                var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+                // var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+                ////TODO -remove this, only for testing
 
-                var cmWithArmEndpoints1 = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+                     ////string cmrid = "/subscriptions/9cece3e3-0f7d-47ca-af0e-9772773f90b7/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_westcentralus/connectionMonitors/vakaranaWCUSCM";
+                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "NetworkWatcher_westcentralus", "VAKARANAWCUSCM1");
+                var cm1 = MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(cmcm);
+                MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 };
+
+                var cmWithArmEndpoints = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
                 List<ConnectionMonitorResult> outputCMs = cmWithArmEndpoints?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
 
                 if (outputCMs != null && outputCMs.Count > 0)
