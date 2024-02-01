@@ -37,15 +37,10 @@ using Microsoft.Rest;
 using Microsoft.Azure.Management.Internal.Resources;
 using Microsoft.Azure.Management.Internal.Resources.Utilities;
 using Microsoft.Azure.Management.Internal.Resources.Models;
-using System.Runtime.Caching;
 using Microsoft.WindowsAzure.Commands.Utilities.Common;
 using Microsoft.Azure.Commands.Common.Strategies;
-using Microsoft.Azure.Management.Monitor.Version2018_09_01.Models;
-using System.IO;
-using System.Runtime.Serialization.Formatters.Binary;
-using System.Management.Automation.Language;
-using System.Reflection;
 using Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter.ArrayExtensions;
+using System.Reflection;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
@@ -79,7 +74,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         /// Get All the connection Monitors under user context subscriptions
         /// </summary>
         /// <param name="subscriptionsList">user context subscriptions</param>
-        /// <param name="region">connection monitor region</param>
+        /// <param name="region">connection monitor key</param>
         /// <returns>collection of all the ConnectionMonitor Resource Detail</returns>
         protected IEnumerable<GenericResource> GetConnectionMonitorBySubscriptions(IEnumerable<string> subscriptionsList, string region = null)
         {
@@ -416,6 +411,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             var getDistinctWorkSpaceAndAddress = cmAllMMAEndpoints?.GroupBy(g => new { g.ResourceId, g.Address }).Select(s => s.FirstOrDefault());
             return await QueryForLaWorkSpaceNetworkAgentData(getDistinctWorkSpaceAndAddress);
         }
+
         protected async Task<List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>> MigrateCM(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
         {
             List<PSNetworkWatcherConnectionMonitorEndpointObject> mmaEndpoints = mmaMachineCMs.SelectMany(s => s.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
@@ -425,7 +421,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails = await FetchArcMachineDetails(mmaEndpoints.AsEnumerable());
 
             // fetch all ARC machines and now call ARM to get location of each machine.
-            List<string> arcMachines = arcmMachineDetails.Values.SelectMany(s => s).Select(s => s.ResourceId).Distinct().ToList();
+            List<string> arcMachines = arcmMachineDetails.Values.SelectMany(s => s).Select(s => s.ResourceId).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToList();
 
             Dictionary<string, string> arcMachineToRegion = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -443,84 +439,40 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 var endpoints = cm.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
             || w.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))).ToList();
 
-                // Validate if all endpoints can be converted to arc.
-                List<string> endointsNotConverted = new List<string>();
-
-                endpoints.ForEach(endpoint =>
-                {
-                    if (!arcmMachineDetails.ContainsKey(endpoint.ResourceId))
-                        endointsNotConverted.Add(endpoint.ResourceId);
-
-                    List<NetworkAgentDetails> arcDetails = new List<NetworkAgentDetails>();
-                if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                {
-                    arcmMachineDetails.TryGetValue(endpoint.ResourceId, out arcDetails);
-                    // arcDetails = arcmMachineDetails[endpoint.ResourceId];
-                    // TODO this check is needed, add this check back.
-                    // Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
-                }
-                else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                {
-                    foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope.Include)
-                    {
-                        string subnetAddress = item.Address;
-                        arcmMachineDetails.TryGetValue(endpoint.ResourceId, out var arcDetailsTemp);
-                        arcDetails = arcDetailsTemp?.Where(arc => subnetAddress?.Equals(arc.SubnetId, StringComparison.OrdinalIgnoreCase) ?? false)?.ToList();
-                        if (arcDetails?.Any() ?? false)
-                                break;
-                        }
-                    }
-                    
-                    if (!arcDetails?.Any() ?? true)
-                        endointsNotConverted.Add(endpoint.ResourceId);
-                });
-
                 // Not migrating even if a single endpoint can't migrated to ARC. Else condition handles scenario where all CMs endpoints (MMA ones) can be migrated to ARC.
-                if (endointsNotConverted.Any())
+                if (CheckIfEndpointsBeMigrated(endpoints, arcmMachineDetails))
                 {
                     notUpdatedCMs.Add(cm);
                 }
                 else
                 {
-                    Dictionary<string, List<string>> regionalEndpoints = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-                    cm.TestGroups.ForEach(tg => tg.Sources.ToList().ForEach(s =>
-                    {
-                        var regions = GetRegionOfEndpoint(s, cm.Location, arcmMachineDetails, arcMachineToRegion);
-                        regions.ForEach(region =>
-                        {
-                            if (!regionalEndpoints.ContainsKey(region))
-                                regionalEndpoints.Add(region, new List<string>());
+                    Dictionary<SubscriptionRegionKey, List<string>> subscriptionRegionalEndpoints = GetSubscriptionRegionalEndpoints(cm, arcmMachineDetails, arcMachineToRegion);
 
-                            if (!regionalEndpoints[region]?.Contains(s.Name) ?? false)
-                                regionalEndpoints[region].Add(s.Name);
-                        });
-                    }));
-
-                    // iterate regionalEndpoints
-                    // for 1st region - duplicate CM and update MMAMachine endpoints simply.
+                    // iterate subscriptionRegionalEndpoints
+                    // for 1st key - duplicate CM and update MMAMachine endpoints simply.
                     //                - update MMANetwork and needed, add more endpoind and update those in test groups
-                    // for 2nd region - duplicate CM and perform same operation as above (tweak name a bit)
-                    //                - removes the MMAMachine or others endpoints which are already added in 1st region and corresponding testGroups.
+                    // for 2nd key - duplicate CM and perform same operation as above (tweak name a bit)
+                    //                - removes the MMAMachine or others endpoints which are already added in 1st key and corresponding testGroups.
 
                     bool sameCM = true;
                     int cmIteration = 0;
-                    regionalEndpoints.ForEach(regionalEndpoint =>
+                    subscriptionRegionalEndpoints.ForEach(subscriptionRegion =>
                     {
                         PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor newCM = cm.Copy();
                         //NetworkResourceManagerProfile.Mapper.Map<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>(cm);
 
-                        newCM.Location = regionalEndpoint.Key;
+                        newCM.Location = subscriptionRegion.Key.Region;
                         if (!sameCM)
                         {
                             newCM.Name = newCM.Name + "_" + cmIteration;
-                            newCM.Id = "/subscriptions/" + this.DefaultContext.Subscription.Id + "/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_" + newCM.Location + "/connectionMonitors/" + newCM.Name;
+                            newCM.Id = "/subscriptions/" + subscriptionRegion.Key.SubscriptionId + "/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_" + newCM.Location + "/connectionMonitors/" + newCM.Name;
                         }
 
 
                         foreach (var endpoint in cm.Endpoints)
                         {
-                            // Remove endpoints from test groups if they are not part of this region. Later we'll update the test-groups for parity.
-                            if (!regionalEndpoint.Value.Contains(endpoint.Name))
+                            // Remove endpoints from test groups if they are not part of this key. Later we'll update the test-groups for parity.
+                            if (!subscriptionRegion.Value.Contains(endpoint.Name))
                             {
                                 newCM.TestGroups.ForEach(tg =>
                                 {
@@ -567,7 +519,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                             {
                                 List<string> ipsNotCovered = new List<string>();
                                 Dictionary<string, List<string>> arcIdToAddressList = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-                                foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope.Include)
+                                foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope?.Include)
                                 {
                                     string subnetAddress = item.Address;
                                     var arcDetails = arcmMachineDetails[endpoint.ResourceId].Where(arc => subnetAddress?.Equals(arc.SubnetId, StringComparison.OrdinalIgnoreCase) ?? false).FirstOrDefault();
@@ -585,7 +537,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         arcIdToAddressList[arcDetails.ResourceId].Add(subnetAddress);
                                     }
                                 }
-                                Console.WriteLine($"CM {cm.Name}, endpoint {endpoint.Name} has few IPs on Include scope, which won't be converted to ArcNetwork. Ips not covered - {string.Join(",", ipsNotCovered)}");
+                                WriteInformation($"CM {cm.Name}, endpoint {endpoint.Name} has few IPs on Include scope, which won't be converted to ArcNetwork. Ips not covered - {string.Join(",", ipsNotCovered)}", new string[] {"PSHOST"});
 
                                 bool sameEndpoint = true;
                                 int endpointIteration = 0;
@@ -606,7 +558,8 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                     };
                                     newEndpoint.Scope = new PSNetworkWatcherConnectionMonitorEndpointScope()
                                     {
-                                        Include = new List<PSNetworkWatcherConnectionMonitorEndpointScopeItem>()
+                                        Include = new List<PSNetworkWatcherConnectionMonitorEndpointScopeItem>(),
+                                        Exclude = new List<PSNetworkWatcherConnectionMonitorEndpointScopeItem>()
                                     };
                                     
                                     arcIdToAddress.Value.ForEach(address =>
@@ -614,6 +567,15 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         newEndpoint.Scope.Include.Add(new PSNetworkWatcherConnectionMonitorEndpointScopeItem()
                                         {
                                             Address = address
+                                        });
+                                    });
+
+                                    // copy all exclude endpoints from MMANetwork endpoint to ArcNetwork endpoint
+                                    endpoint?.Scope?.Exclude?.ForEach(exclude =>
+                                    {
+                                        newEndpoint.Scope.Exclude.Add(new PSNetworkWatcherConnectionMonitorEndpointScopeItem()
+                                        {
+                                            Address = exclude.Address
                                         });
                                     });
 
@@ -665,6 +627,63 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return updatedCMs;
         }
 
+
+        // Validate if all endpoints can be converted to arc.
+        private bool CheckIfEndpointsBeMigrated(List<PSNetworkWatcherConnectionMonitorEndpointObject> endpoints, Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails)
+        {
+            List<string> endointsNotConverted = new List<string>();
+
+            endpoints.ForEach(endpoint =>
+            {
+                if (!arcmMachineDetails.ContainsKey(endpoint.ResourceId))
+                    endointsNotConverted.Add(endpoint.ResourceId);
+
+                List<NetworkAgentDetails> arcDetails = new List<NetworkAgentDetails>();
+                if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+                {
+                    arcmMachineDetails.TryGetValue(endpoint.ResourceId, out arcDetails);
+                    // arcDetails = arcmMachineDetails[endpoint.ResourceId];
+                    // TODO this check is needed, add this check back.
+                    // Where(arc => endpoint.Address.Equals(arc.AgentIP)).ToList();
+                }
+                else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (PSNetworkWatcherConnectionMonitorEndpointScopeItem item in endpoint.Scope.Include)
+                    {
+                        string subnetAddress = item.Address;
+                        arcmMachineDetails.TryGetValue(endpoint.ResourceId, out var arcDetailsTemp);
+                        arcDetails = arcDetailsTemp?.Where(arc => subnetAddress?.Equals(arc.SubnetId, StringComparison.OrdinalIgnoreCase) ?? false)?.ToList();
+                        if (arcDetails?.Any() ?? false)
+                            break;
+                    }
+                }
+
+                if (!arcDetails?.Any() ?? true)
+                    endointsNotConverted.Add(endpoint.ResourceId);
+            });
+
+            return endointsNotConverted.Any();
+        }
+
+        private Dictionary<SubscriptionRegionKey, List<string>> GetSubscriptionRegionalEndpoints(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm, Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails, Dictionary<string, string> arcMachineToRegion)
+        {
+            Dictionary<SubscriptionRegionKey, List<string>> subscriptionRegionalEndpoints = new Dictionary<SubscriptionRegionKey, List<string>>();
+            cm.TestGroups.ForEach(tg => tg.Sources.ToList().ForEach(s =>
+            {
+                var subsRegionsCombinations = GetSubscriptionRegionOfEndpoint(s, cm, arcmMachineDetails, arcMachineToRegion);
+                subsRegionsCombinations.ForEach(key =>
+                {
+                    if (!subscriptionRegionalEndpoints.ContainsKey(key))
+                        subscriptionRegionalEndpoints.Add(key, new List<string>());
+
+                    if (!subscriptionRegionalEndpoints[key]?.Contains(s.Name) ?? false)
+                        subscriptionRegionalEndpoints[key].Add(s.Name);
+                });
+            }));
+
+            return subscriptionRegionalEndpoints;
+        }
+
         private void EndpointsCleanup(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm)
         {
             var endpointsToReplace = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
@@ -709,242 +728,35 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return genericResources;
         }
 
-        private List<string> GetRegionOfEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint, string cmRegion, Dictionary<string, List<NetworkAgentDetails>> laToArcDetails, Dictionary<string, string> arcMachineToRegion)
+        protected string GetSubscriptionFromResourceId(string resourceId)
+        {
+            string[] resourceIdParts = resourceId.Split('/');
+            return resourceIdParts[2];
+        }
+
+        // Get different subscription and key combinations for a given endpoint [mainly useful for MMAWorkspaceNetwork]
+        private List<SubscriptionRegionKey> GetSubscriptionRegionOfEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint, PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm, Dictionary<string, List<NetworkAgentDetails>> laToArcDetails, Dictionary<string, string> arcMachineToRegion)
         {
             if (!endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase) && !endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
             {
-                return new List<string> { cmRegion };
+                return new List<SubscriptionRegionKey> { new SubscriptionRegionKey(GetSubscriptionFromResourceId(cm.Id), cm.Location) };
             }
             else
             {
                 string resourceId = endpoint.ResourceId;
-                List<string> arcDetails = laToArcDetails[resourceId].Select(s=> s.ResourceId).ToList();
-                List<string> regions = new List<string>();
+                List<string> arcDetails = laToArcDetails[resourceId].Select(s => s.ResourceId).Where(s=> !string.IsNullOrEmpty(s)).ToList();
+                List<SubscriptionRegionKey> subsRegionsKeys = new List<SubscriptionRegionKey>();
                 arcDetails.ForEach(s => {
                     arcMachineToRegion.TryGetValue(s, out string region);
-                    if (!regions.Contains(region))
+                    SubscriptionRegionKey subsRegionKey = new SubscriptionRegionKey(GetSubscriptionFromResourceId(s), region);
+                    if (!subsRegionsKeys.Contains(subsRegionKey))
                     {
-                        regions.Add(region);
+                        subsRegionsKeys.Add(subsRegionKey);
                     }
                 });
 
-                return regions;
+                return subsRegionsKeys;
             }
-        }
-
-            protected async Task<List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>> MigrateCMs(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
-        {
-            var CmWithMmaEndpoints = mmaMachineCMs.Select(s => new
-            {
-                CM = s,
-                Endpoints = s.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-            || w.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))
-            });
-
-            // Need to refactor for distinct data
-            var getCmWithEndpointsAndNetworkAgentDataList = await Task.WhenAll(CmWithMmaEndpoints.Select(async s => new
-            {
-                Cm = s.CM,
-                EndpointWithNetworkAgentData = await QueryForLaWorkSpaceNetworkAgentData1(s.Endpoints)
-            }));
-
-            //WriteInformation($"Before update\n{JsonConvert.SerializeObject(getCmWithEndpointsAndNetworkAgentDataList, Formatting.Indented)}\n", new string[] { "PSHOST" });
-
-            List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> UpdatedArcCmList = new List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>();
-
-            getCmWithEndpointsAndNetworkAgentDataList.ForEach(data =>
-            {
-                Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> dictDestinationMMANetworkIdToSubnetAddresses = null;
-                Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> dictSourcesMMANetworkIdToSubnetAddresses = null;
-
-                //Destination update
-                data.Cm.TestGroups.Where(w => w.Destinations.Any(iw => iw.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-                || iw.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))
-                ?.ForEach(testGrp =>
-                {
-                    //copyableTestGrp = copyableTestGrp ?? GetCopiedTestGroupObject(testGrp);
-                    //copyableEndpoints = copyableEndpoints ?? new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
-                    //copyableTestGrp.Destinations = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
-
-                    List<PSNetworkWatcherConnectionMonitorEndpointObject> destinationMMAWorkspaceNetworkEndpoints = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
-                    dictDestinationMMANetworkIdToSubnetAddresses = dictDestinationMMANetworkIdToSubnetAddresses ?? new Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>>();
-
-                    testGrp.Destinations.Where(d => d.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-                    || d.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    .ForEach(destination =>
-                    {
-                        if (data.EndpointWithNetworkAgentData.ContainsKey(destination.ResourceId)
-                        && data.EndpointWithNetworkAgentData[destination.ResourceId]?.Results?.Count() > 0)
-                        {
-                            bool isUpdatedEndpoint = UpdateTestGrpEndpoints(destination, data.EndpointWithNetworkAgentData,
-                                   destinationMMAWorkspaceNetworkEndpoints, dictDestinationMMANetworkIdToSubnetAddresses);
-
-                            if (isUpdatedEndpoint && !UpdatedArcCmList.Any(a => a.Id.Equals(data.Cm.Id, StringComparison.OrdinalIgnoreCase)))
-                            {
-                                UpdatedArcCmList.Add(data.Cm);
-                            }
-                        }
-                    });
-                });
-
-                //Sources update
-                data.Cm.TestGroups.Where(w => w.Sources.Any(iw => iw.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-                || iw.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))
-                ?.ForEach(testGrp =>
-                {
-                    List<PSNetworkWatcherConnectionMonitorEndpointObject> sourceMMAWorkspaceNetworkEndpoints = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
-                    dictSourcesMMANetworkIdToSubnetAddresses = dictSourcesMMANetworkIdToSubnetAddresses ?? new Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>>();
-
-                    testGrp.Sources.Where(d => d.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-                    || d.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    .ForEach(source =>
-                    {
-                        if (data.EndpointWithNetworkAgentData.ContainsKey(source.ResourceId)
-                        && data.EndpointWithNetworkAgentData[source.ResourceId]?.Results?.Count() > 0)
-                        {
-                            bool isUpdatedEndpoint = UpdateTestGrpEndpoints(source, data.EndpointWithNetworkAgentData,
-                                sourceMMAWorkspaceNetworkEndpoints, dictSourcesMMANetworkIdToSubnetAddresses);
-
-                            if (isUpdatedEndpoint && !UpdatedArcCmList.Any(a => a.Id.Equals(data.Cm.Id, StringComparison.OrdinalIgnoreCase)))
-                            {
-                                UpdatedArcCmList.Add(data.Cm);
-                            }
-                        }
-                    });
-
-                    // For MMAWorkspaceNetwork
-                    // Need to Check this condition as it required extra check or not
-                    if (data.Cm.Endpoints.Any(a => a.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    || testGrp.Sources.Any(a => a.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    || testGrp.Destinations.Any(a => a.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
-                    )
-                    {
-                        //Remove the MMAWorkspaceNetwork endpoint and update the sources endpoints
-                        UpdateMmaNetworkTestGroup(testGrp.Sources, dictSourcesMMANetworkIdToSubnetAddresses);
-
-                        //Remove the MMAWorkspaceNetwork endpoint and update the Destination Endpoints
-                        UpdateMmaNetworkTestGroup(testGrp.Destinations, dictDestinationMMANetworkIdToSubnetAddresses);
-
-                        //updating the endpoints
-                        UpdatedMMaNetworkEndpointCollection(data.Cm, dictSourcesMMANetworkIdToSubnetAddresses, dictDestinationMMANetworkIdToSubnetAddresses);
-                    }
-                });
-
-                //Need to discuss update endpoints reference from cm data.
-            });
-
-            // WriteInformation($"After Modification in CMs: \n{JsonConvert.SerializeObject(getCmWithEndpointsAndNetworkAgentDataList, Formatting.Indented)}\n", new string[] { "PSHOST" });
-
-            return UpdatedArcCmList;
-        }
-
-        private bool UpdateTestGrpEndpoints(PSNetworkWatcherConnectionMonitorEndpointObject testGrpEndpoint,
-            Dictionary<string, Azure.OperationalInsights.Models.QueryResults> EndpointQueryResult,
-            List<PSNetworkWatcherConnectionMonitorEndpointObject> mmaWorkspaceNetworkEndpoints,
-            Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> dictMMANetworkIdToSubnetAddresses)
-        {
-            var queryResult = EndpointQueryResult[testGrpEndpoint.ResourceId]?.Results;
-            if (queryResult != null)
-            {
-                bool isUpdated = false;
-                // For MMAWorkspaceNetwork
-                if (testGrpEndpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)
-                && testGrpEndpoint?.Scope?.Include != null)
-                {
-                    var matchedArcSubnetAddressesList = queryResult.Where(w =>
-                    testGrpEndpoint?.Scope?.Include.Any(a => a.Address.Equals(w["SubnetId"], StringComparison.OrdinalIgnoreCase)) == true);
-
-                    //Need to discuss a point here, if not a single subnet is matched with include addresses
-
-                    PSNetworkWatcherConnectionMonitorEndpointObject endpointObject = null;
-                    int i = 0;
-                    foreach (var arcDetail in matchedArcSubnetAddressesList)
-                    {
-                        endpointObject = new PSNetworkWatcherConnectionMonitorEndpointObject
-                        {
-                            Address = arcDetail["AgentIP"],
-                            Name = $"{arcDetail["AgentFqdn"]}-{i++}",
-                            //Need to check for resourceId and other field as well
-                            Type = CommonConstants.AzureArcVMType,
-                        };
-
-                        mmaWorkspaceNetworkEndpoints.Add(endpointObject);
-                        if (!dictMMANetworkIdToSubnetAddresses.ContainsKey(testGrpEndpoint?.ResourceId))
-                        {
-                            dictMMANetworkIdToSubnetAddresses.Add(testGrpEndpoint?.ResourceId, mmaWorkspaceNetworkEndpoints);
-                        }
-                    }
-                    //Check for MMANetwork CM entry
-                    isUpdated = true;
-                }
-                else
-                {
-                    //Need to check, for MMaWorkSpaceMachine, we are using first records and updating the data
-                    var firstResult = queryResult.FirstOrDefault();
-                    if (firstResult != null && !string.IsNullOrEmpty(firstResult["ResourceId"]))
-                    {
-                        testGrpEndpoint.ResourceId = firstResult["ResourceId"];
-                        testGrpEndpoint.Name = firstResult["AgentFqdn"];
-                        testGrpEndpoint.Type = CommonConstants.AzureArcVMType;
-                        // For AzureArcVM type, address properties not required, passing empty
-                        testGrpEndpoint.Address = string.Empty;
-
-                        isUpdated = true;
-                    }
-                }
-
-                return isUpdated;
-            }
-
-            return false;
-        }
-
-        private PSNetworkWatcherConnectionMonitorTestGroupObject GetCopiedTestGroupObject(PSNetworkWatcherConnectionMonitorTestGroupObject currentTestGrpObject)
-        {
-            return new PSNetworkWatcherConnectionMonitorTestGroupObject
-            {
-                Name = currentTestGrpObject.Name,
-                Disable = currentTestGrpObject.Disable,
-                TestConfigurations = currentTestGrpObject.TestConfigurations,
-            };
-        }
-
-        private void UpdateMmaNetworkTestGroup(List<PSNetworkWatcherConnectionMonitorEndpointObject> endpoints, Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> dict)
-        {
-            var matchedItems = dict?
-                .Where(w => endpoints.Any(a => a?.ResourceId.Equals(w.Key, StringComparison.OrdinalIgnoreCase) == true
-                    && a.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))?.ToList();
-
-            if (matchedItems != null && matchedItems.Count > 0)
-            {
-                endpoints.AddRange(matchedItems.SelectMany(s => s.Value).Distinct());
-                endpoints.RemoveAll(r => matchedItems.Any(a => a.Key.Equals(r?.ResourceId, StringComparison.OrdinalIgnoreCase) == true));
-            }
-        }
-
-        private void UpdatedMMaNetworkEndpointCollection(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm,
-        Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> sourceDict,
-        Dictionary<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>> destinationDict)
-        {
-            var combinedList = new List<KeyValuePair<string, List<PSNetworkWatcherConnectionMonitorEndpointObject>>>();
-
-            if (sourceDict != null)
-            {
-                combinedList.AddRange(sourceDict);
-            }
-
-            if (destinationDict != null)
-            {
-                // Only add entries from dict2 that do not exist in dict1
-                combinedList.AddRange(destinationDict.Where(x => !combinedList.Any(a => a.Key.Contains(x.Key))));
-            }
-
-            // Update the endpoints collections
-            cm.Endpoints.AddRange(combinedList.SelectMany(s => s.Value).Distinct()?.ToList());
-
-            // removing the MMANetwork endpoint from endpoint collection
-            cm.Endpoints.RemoveAll(r => sourceDict?.Any(a => a.Key.Equals(r?.ResourceId, StringComparison.OrdinalIgnoreCase) == true) == true
-            || destinationDict?.Any(a => a.Key.Equals(r?.ResourceId, StringComparison.OrdinalIgnoreCase) == true) == true);
         }
 
         private IEnumerable<PSNetworkWatcherConnectionMonitorEndpointObject> GetAllMMAEndpoints(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
@@ -1023,14 +835,21 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         private List<NetworkAgentDetails> GetNetworkAgentDetails(Azure.OperationalInsights.Models.QueryResults queryResults)
         {
             List<NetworkAgentDetails> data = new List<NetworkAgentDetails>();
-            queryResults.Results.ForEach(result => data.Add(new NetworkAgentDetails()
+            queryResults.Results.ForEach(result =>
             {
-                ResourceId = result["ResourceId"].ToString(),
-                AgentId = result["AgentId"].ToString(),
-                SubnetId = result["SubnetId"].ToString(),
-                AgentIP = result["AgentIP"].ToString(),
-                AgentFqdn = result["AgentFqdn"].ToString()
-            }));
+                string resourceId = result["ResourceId"].ToString();
+                if (!string.IsNullOrEmpty(resourceId))
+                {
+                    data.Add(new NetworkAgentDetails()
+                    {
+                        ResourceId = result["ResourceId"].ToString(),
+                        AgentId = result["AgentId"].ToString(),
+                        SubnetId = result["SubnetId"].ToString(),
+                        AgentIP = result["AgentIP"].ToString(),
+                        AgentFqdn = result["AgentFqdn"].ToString()
+                    });
+                }
+            });
 
             return data;
         }

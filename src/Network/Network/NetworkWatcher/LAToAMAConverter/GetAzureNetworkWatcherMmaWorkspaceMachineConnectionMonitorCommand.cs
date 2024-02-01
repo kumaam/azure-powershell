@@ -92,6 +92,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     "The endpoint for the Azure Resource Manager service is not set. Please report this issue via GitHub or contact Microsoft customer support.");
             }
 
+            if (this.WorkSpaceId != null)
+            {
+                this.SubscriptionId = GetSubscriptionFromResourceId(this.WorkSpaceId);
+            }    
+
             List<string> subscriptionIds = new List<string>();
 
             if (!string.IsNullOrEmpty(this.SubscriptionId))
@@ -105,7 +110,12 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             }
 
             IEnumerable<GenericResource> allCMs = GetConnectionMonitorBySubscriptions(subscriptionIds, this.Region);
-            List<ConnectionMonitorResult> allCmHasMMAWorkspaceMachine = GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(allCMs, this.CMEndpointType ?? CommonConstants.MMAWorkspaceMachineEndpointResourceType, this.WorkSpaceId)?.GetAwaiter().GetResult();
+            if (string.IsNullOrEmpty(this.CMEndpointType))
+            {
+                this.CMEndpointType = CommonConstants.MMAWorkspaceMachineEndpointResourceType;
+            }
+
+            List<ConnectionMonitorResult> allCmHasMMAWorkspaceMachine = GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(allCMs, this.CMEndpointType, this.WorkSpaceId)?.GetAwaiter().GetResult();
 
             if (allCmHasMMAWorkspaceMachine?.Count() > 0)
             {

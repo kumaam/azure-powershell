@@ -62,18 +62,17 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             if (MMAWorkspaceConnectionMonitors?.Count() >= 0)
             {
                 /*** var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
-                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "NetworkWatcher_eastus", "LA-AMA-MMANetwork-TCP-HTTP");
+                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "networkwatcher_westcentralus", "vakaranaWCUSCM1");
                 var cm1 = MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(cmcm);
-                MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 };
-                **/
+                MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 }; **/
+
 
                 var cmWithArmEndpoints = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
                 List<ConnectionMonitorResult> outputCMs = cmWithArmEndpoints?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
 
                 if (outputCMs != null && outputCMs.Count > 0)
                 {
-                    var cmListGrpByLocation = outputCMs.GroupBy(g => new { g.Location })
-                        ?.OrderByDescending(o => o.Key.Location)?.Select(s => s.ToList());
+                    var cmListGrpByLocation = outputCMs.GroupBy(g => new SubscriptionRegionKey(g.Location, GetSubscriptionFromResourceId(g.Id))).Select(g => g.ToList()).ToList();
 
                     List<string> outputTemplate = new List<string>();
                     foreach (var cmList in cmListGrpByLocation)
