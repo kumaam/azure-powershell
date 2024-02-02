@@ -95,7 +95,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             if (this.WorkSpaceId != null)
             {
                 this.SubscriptionId = GetSubscriptionFromResourceId(this.WorkSpaceId);
-            }    
+            } 
 
             List<string> subscriptionIds = new List<string>();
 
