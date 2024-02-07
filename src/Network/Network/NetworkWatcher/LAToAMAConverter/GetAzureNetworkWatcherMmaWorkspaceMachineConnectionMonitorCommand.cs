@@ -92,10 +92,12 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     "The endpoint for the Azure Resource Manager service is not set. Please report this issue via GitHub or contact Microsoft customer support.");
             }
 
+            /***
             if (this.WorkSpaceId != null)
             {
                 this.SubscriptionId = GetSubscriptionFromResourceId(this.WorkSpaceId);
             } 
+            **/
 
             List<string> subscriptionIds = new List<string>();
 

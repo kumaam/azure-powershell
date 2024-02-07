@@ -74,7 +74,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         /// Get All the connection Monitors under user context subscriptions
         /// </summary>
         /// <param name="subscriptionsList">user context subscriptions</param>
-        /// <param name="region">connection monitor key</param>
+        /// <param name="region">connection monitor regionToEndpointsKey</param>
         /// <returns>collection of all the ConnectionMonitor Resource Detail</returns>
         protected IEnumerable<GenericResource> GetConnectionMonitorBySubscriptions(IEnumerable<string> subscriptionsList, string region = null)
         {
@@ -446,32 +446,33 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
                 else
                 {
-                    Dictionary<SubscriptionRegionKey, List<string>> subscriptionRegionalEndpoints = GetSubscriptionRegionalEndpoints(cm, arcmMachineDetails, arcMachineToRegion);
+                    // Dictionary<SubscriptionRegionKey, List<string>> subscriptionRegionalEndpoints = GetSubscriptionRegionalEndpoints(cm, arcmMachineDetails, arcMachineToRegion);
+                    Dictionary<string, List<string>> regionalEndpoints = GetRegionalEndpoints(cm, arcmMachineDetails, arcMachineToRegion);
 
-                    // iterate subscriptionRegionalEndpoints
-                    // for 1st key - duplicate CM and update MMAMachine endpoints simply.
+                    // iterate regionalEndpoints
+                    // for 1st regionToEndpointsKey - duplicate CM and update MMAMachine endpoints simply.
                     //                - update MMANetwork and needed, add more endpoind and update those in test groups
-                    // for 2nd key - duplicate CM and perform same operation as above (tweak name a bit)
-                    //                - removes the MMAMachine or others endpoints which are already added in 1st key and corresponding testGroups.
+                    // for 2nd regionToEndpointsKey - duplicate CM and perform same operation as above (tweak name a bit)
+                    //                - removes the MMAMachine or others endpoints which are already added in 1st regionToEndpointsKey and corresponding testGroups.
 
-                    // different regions are handled here for MMAWorkspaceNetwork. Change it to regionalEndpoints rather than subscriptionRegionalEndpoints.
+                    // different regions are handled here for MMAWorkspaceNetwork.
                     bool sameCM = true;
-                    subscriptionRegionalEndpoints.ForEach(subscriptionRegion =>
+                    regionalEndpoints.ForEach(regionToEndpointsKey =>
                     {
                         PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor newCM = cm.Copy();
 
-                        newCM.Location = subscriptionRegion.Key.Region;
+                        newCM.Location = regionToEndpointsKey.Key;
                         if (!sameCM)
                         {
-                            newCM.Name = newCM.Name + "_" + subscriptionRegion.Key.Region;
-                            newCM.Id = "/subscriptions/" + subscriptionRegion.Key.SubscriptionId + "/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_" + newCM.Location + "/connectionMonitors/" + newCM.Name;
+                            newCM.Name = newCM.Name + "_" + regionToEndpointsKey.Key;
+                            newCM.Id = "/subscriptions/" + this.DefaultContext.Subscription.Id + "/resourceGroups/networkwatcherrg/providers/Microsoft.Network/networkWatchers/NetworkWatcher_" + newCM.Location + "/connectionMonitors/" + newCM.Name;
                         }
 
 
                         foreach (var endpoint in cm.Endpoints)
                         {
-                            // Remove endpoints from test groups if they are not part of this key. Later we'll update the test-groups for parity.
-                            if (!subscriptionRegion.Value.Contains(endpoint.Name))
+                            // Remove endpoints from test groups if they are not part of this regionToEndpointsKey. Later we'll update the test-groups for parity.
+                            if (!regionToEndpointsKey.Value.Contains(endpoint.Name))
                             {
                                 newCM.TestGroups.ForEach(tg =>
                                 {
@@ -544,7 +545,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         foreach (var arc in arcDetails)
                                         {
                                             arcMachineToRegion.TryGetValue(arc.ResourceId, out string arcRegion);
-                                            if (subscriptionRegion.Key.Region.Equals(arcRegion, StringComparison.OrdinalIgnoreCase))
+                                            if (regionToEndpointsKey.Key.Equals(arcRegion, StringComparison.OrdinalIgnoreCase))
                                             {
                                                 arcDataForIpAddress = arc;
                                                 break;
@@ -586,7 +587,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                     newEndpoint.SubscriptionId = subsIdToAddress.Key;
                                     newEndpoint.LocationDetails = new PSConnectionMonitorEndPointLocationDetails()
                                     {
-                                        Region = subscriptionRegion.Key.Region
+                                        Region = regionToEndpointsKey.Key
                                     };
                                     newEndpoint.Scope = new PSNetworkWatcherConnectionMonitorEndpointScope()
                                     {
@@ -712,6 +713,25 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return subscriptionRegionalEndpoints;
         }
 
+        private Dictionary<string, List<string>> GetRegionalEndpoints(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm, Dictionary<string, List<NetworkAgentDetails>> arcmMachineDetails, Dictionary<string, string> arcMachineToRegion)
+        {
+            Dictionary<string, List<string>> regionalEndpoints = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            cm.TestGroups.ForEach(tg => tg.Sources.ToList().ForEach(s =>
+            {
+                var regions = GetRegionsOfEndpoint(s, cm, arcmMachineDetails, arcMachineToRegion);
+                regions.ForEach(region =>
+                {
+                    if (!regionalEndpoints.ContainsKey(region))
+                        regionalEndpoints.Add(region, new List<string>());
+
+                    if (!regionalEndpoints[region]?.Contains(s.Name) ?? false)
+                        regionalEndpoints[region].Add(s.Name);
+                });
+            }));
+
+            return regionalEndpoints;
+        }
+
         private void EndpointsCleanup(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm)
         {
             var endpointsToReplace = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
@@ -762,7 +782,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return resourceIdParts[2];
         }
 
-        // Get different subscription and key combinations for a given endpoint [mainly useful for MMAWorkspaceNetwork]
+        // Get different subscription and regionToEndpointsKey combinations for a given endpoint [mainly useful for MMAWorkspaceNetwork]
         private List<SubscriptionRegionKey> GetSubscriptionRegionOfEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint, PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm, Dictionary<string, List<NetworkAgentDetails>> laToArcDetails, Dictionary<string, string> arcMachineToRegion)
         {
             if (!endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase) && !endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
@@ -784,6 +804,30 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 });
 
                 return subsRegionsKeys;
+            }
+        }
+
+        // Get different subscription and regionToEndpointsKey combinations for a given endpoint [mainly useful for MMAWorkspaceNetwork]
+        private List<string> GetRegionsOfEndpoint(PSNetworkWatcherConnectionMonitorEndpointObject endpoint, PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor cm, Dictionary<string, List<NetworkAgentDetails>> laToArcDetails, Dictionary<string, string> arcMachineToRegion)
+        {
+            if (!endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase) && !endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<string> {  cm.Location };
+            }
+            else
+            {
+                string resourceId = endpoint.ResourceId;
+                List<string> arcDetails = laToArcDetails[resourceId].Select(s => s.ResourceId).Where(s => !string.IsNullOrEmpty(s)).ToList();
+                List<string> regions = new List<string>();
+                arcDetails.ForEach(s => {
+                    arcMachineToRegion.TryGetValue(s, out string region);
+                    if (!regions.Contains(region))
+                    {
+                        regions.Add(region);
+                    }
+                });
+
+                return regions;
             }
         }
 
