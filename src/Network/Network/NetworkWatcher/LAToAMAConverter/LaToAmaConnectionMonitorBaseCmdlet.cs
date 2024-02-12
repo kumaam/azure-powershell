@@ -489,7 +489,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                     ep =>
                                     {
                                         ep.Type = CommonConstants.AzureArcVMType;
-                                        ep.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                        ep.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
                                         ep.Address = null;
                                         if (endpoint.Scope?.Include?.Any() ?? false)
                                         {
@@ -504,7 +504,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
                                         {
                                             s.Type = CommonConstants.AzureArcVMType;
-                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
                                             s.Address = null;
                                             if (endpoint.Scope?.Include?.Any() ?? false)
                                             {
@@ -518,7 +518,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
                                         {
                                             s.Type = CommonConstants.AzureArcVMType;
-                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault().ResourceId;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
                                             s.Address = null;
                                             if (endpoint.Scope?.Include?.Any() ?? false)
                                             {
@@ -641,6 +641,20 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                             }
                         }
 
+
+                        // Remove Arc endpoints from tg which belongs to different regions.
+                        newCM.TestGroups.ForEach(tg =>
+                        {
+                            var endpointsToRemove = new List<PSNetworkWatcherConnectionMonitorEndpointObject>();
+                            tg.Sources.ForEach(source =>
+                            {
+                                if (source.Type.Equals(CommonConstants.AzureArcVMType) && !arcMachineToRegion[source.ResourceId].Equals(regionToEndpointsKey.Key, StringComparison.OrdinalIgnoreCase))
+                                    endpointsToRemove.Add(source);
+                            });
+                            tg.Sources = tg.Sources.Except(endpointsToRemove).ToList();
+                        });
+
+
                         //cm.Endpoints might have unused endpoints, remove them. For every endpoint in cm.Endpoints, check if it exists in cm.Sources/destination, if not remove it.
                         EndpointsCleanup(newCM);
                         TestGroupsCleanup(newCM);
@@ -671,9 +685,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     endointsNotConverted.Add(endpoint.ResourceId);
 
                 List<NetworkAgentDetails> arcDetails = new List<NetworkAgentDetails>();
+                // AgentFQDN and AgentIP both comparision needed for MMAWorkspaceMachine
                 if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                 {
-                    arcmMachineDetails.TryGetValue(endpoint.ResourceId, out arcDetails);
+                    arcmMachineDetails.TryGetValue(endpoint.ResourceId, out var arcDetailsTemp);
+                    arcDetails = arcDetailsTemp.Where(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ToList();
                 }
                 else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                 {
@@ -770,7 +786,14 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             Parallel.ForEach(resourceIds, id =>
             {
                 //Need to check API Version
-                genericResources.Add(ArmClient.Resources.GetById(id, "2022-12-27"));
+                try
+                {
+                    genericResources.Add(ArmClient.Resources.GetById(id, "2022-12-27"));
+                }
+                catch (Exception e)
+                {
+                    WriteInformation($"failed to fetch arc machine {id}, CM can't be migrated to this Arc machine, exception {e}", new string[] { "PSHOST" });
+                }
             });
 
             return genericResources;
@@ -821,7 +844,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 List<string> regions = new List<string>();
                 arcDetails.ForEach(s => {
                     arcMachineToRegion.TryGetValue(s, out string region);
-                    if (!regions.Contains(region))
+                    if (!string.IsNullOrEmpty(region) && !regions.Contains(region))
                     {
                         regions.Add(region);
                     }
