@@ -27,7 +27,7 @@ using Microsoft.Azure.Management.Internal.Resources.Models;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
-    [Cmdlet("Get", AzureRMConstants.AzureRMPrefix + "NetworkWatcherMmaWorkspaceMachineConnectionMonitor", DefaultParameterSetName = "SetByName"), OutputType(typeof(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor))]
+    [Cmdlet("Get", AzureRMConstants.AzureRMPrefix + "NetworkWatcherMmaWorkspaceMachineConnectionMonitor", DefaultParameterSetName = "SetByName"), OutputType(typeof(List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>))]
 
     public class GetAzureNetworkWatcherMmaWorkspaceMachineConnectionMonitor : LaToAmaConnectionMonitorBaseCmdlet
     {
@@ -92,12 +92,10 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     "The endpoint for the Azure Resource Manager service is not set. Please report this issue via GitHub or contact Microsoft customer support.");
             }
 
-            /***
             if (this.WorkSpaceId != null)
             {
                 this.SubscriptionId = GetSubscriptionFromResourceId(this.WorkSpaceId);
-            } 
-            **/
+            }
 
             List<string> subscriptionIds = new List<string>();
 
@@ -121,7 +119,9 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             if (allCmHasMMAWorkspaceMachine?.Count() > 0)
             {
-                WriteInformation($"Total number of Connection Monitors which has MMAWorkspace Endpoints : {allCmHasMMAWorkspaceMachine?.Count()}\n", new string[] { "PSHOST" });
+                string cmList = string.Join("\n", allCmHasMMAWorkspaceMachine.Select(cm => cm.Name));
+
+                WriteInformation($"Total number of Connection Monitors which has MMAWorkspace Endpoints : {allCmHasMMAWorkspaceMachine?.Count()}\n CM Names - {cmList}", new string[] { "PSHOST" });
 
                 List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> psMmaWorkspaceMachineConnectionMonitorList = new List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>();
                 foreach (var connectionMonitor in allCmHasMMAWorkspaceMachine)

@@ -412,7 +412,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             return await QueryForLaWorkSpaceNetworkAgentData(getDistinctWorkSpaceAndAddress);
         }
 
-        protected async Task<List<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor>> MigrateCM(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
+        protected async Task<ConnectionMonitorResultWithArcMachines> MigrateCM(IEnumerable<PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor> mmaMachineCMs)
         {
             List<PSNetworkWatcherConnectionMonitorEndpointObject> mmaEndpoints = mmaMachineCMs.SelectMany(s => s.Endpoints.Where(w => w != null && (w.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase)
             || w.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase)))).ToList();
@@ -489,7 +489,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                     ep =>
                                     {
                                         ep.Type = CommonConstants.AzureArcVMType;
-                                        ep.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
+                                        ep.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase))?.ResourceId;
                                         ep.Address = null;
                                         if (endpoint.Scope?.Include?.Any() ?? false)
                                         {
@@ -504,7 +504,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
                                         {
                                             s.Type = CommonConstants.AzureArcVMType;
-                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase))?.ResourceId;
                                             s.Address = null;
                                             if (endpoint.Scope?.Include?.Any() ?? false)
                                             {
@@ -518,7 +518,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                                         if (s.Name.Equals(endpoint.Name, StringComparison.InvariantCultureIgnoreCase))
                                         {
                                             s.Type = CommonConstants.AzureArcVMType;
-                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ResourceId;
+                                            s.ResourceId = arcmMachineDetails[endpoint.ResourceId].FirstOrDefault(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase))?.ResourceId;
                                             s.Address = null;
                                             if (endpoint.Scope?.Include?.Any() ?? false)
                                             {
@@ -667,10 +667,15 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             notUpdatedCMs.ForEach(cm =>
             {
-                Console.WriteLine($"Not Updating this CM as corresponding Arc servers are not found - {cm.Name}");
+                Console.WriteLine($"Not migrating this connection monitor as corresponding acr server for onpremise machine not found, CM - {cm.Name}");
             });
 
-            return updatedCMs;
+            ConnectionMonitorResultWithArcMachines result = new ConnectionMonitorResultWithArcMachines()
+            {
+                ConnectionMonitorsList = updatedCMs,
+                ArcGenericResources = arcGenericResources
+            };
+            return result;
         }
 
 
@@ -689,7 +694,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceMachineEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                 {
                     arcmMachineDetails.TryGetValue(endpoint.ResourceId, out var arcDetailsTemp);
-                    arcDetails = arcDetailsTemp.Where(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ToList();
+                    arcDetails = arcDetailsTemp?.Where(arc => arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase) || arc.AgentFqdn.Equals(endpoint.Address, StringComparison.OrdinalIgnoreCase)).ToList();
                 }
                 else if (endpoint.Type.Equals(CommonConstants.MMAWorkspaceNetworkEndpointResourceType, StringComparison.OrdinalIgnoreCase))
                 {
@@ -788,11 +793,13 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 //Need to check API Version
                 try
                 {
-                    genericResources.Add(ArmClient.Resources.GetById(id, "2022-12-27"));
+                    GenericResource resourceData = ArmClient.Resources.GetById(id, "2022-12-27");
+                    if (resourceData != null)
+                        genericResources.Add(resourceData);
                 }
                 catch (Exception e)
                 {
-                    WriteInformation($"failed to fetch arc machine {id}, CM can't be migrated to this Arc machine, exception {e}", new string[] { "PSHOST" });
+                    WriteInformation($"failed to fetch resourceId {id}, exception {e}", new string[] { "PSHOST" });
                 }
             });
 
@@ -803,6 +810,12 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         {
             string[] resourceIdParts = resourceId.Split('/');
             return resourceIdParts[2];
+        }
+
+        protected string GetResourceGroupNameFromResourceId(string resourceId)
+        {
+            string[] resourceIdParts = resourceId.Split('/');
+            return resourceIdParts[4];
         }
 
         // Get different subscription and regionToEndpointsKey combinations for a given endpoint [mainly useful for MMAWorkspaceNetwork]
@@ -911,6 +924,8 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             var queryResults = await Task.WhenAll(workSpaceArcDetails.Values);
             var resultDictionary = workSpaceArcDetails.Keys.Zip(queryResults, (key, value) => new { key, value }).ToDictionary(x => x.key, x => x.value);
+            // filter out dictionary with null values
+            resultDictionary = resultDictionary.Where(data => data.Value != null).ToDictionary(data => data.Key, data => data.Value);
             return resultDictionary;
         }
 
@@ -918,9 +933,14 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         {
             Dictionary<string, Azure.OperationalInsights.Models.QueryResults> response = await QueryForLaWorkSpaceNetworkAgentData1(allDistantCMEndpoints);
 
+            if (response == null || response.Count == 0)
+            {
+                return null;
+            }
+
             Dictionary<string, List<NetworkAgentDetails>> resultDictionary = new Dictionary<string, List<NetworkAgentDetails>>(StringComparer.OrdinalIgnoreCase);
 
-            response = response.Where(data => data.Value.Results.Count() > 0).ToDictionary(data => data.Key, data => data.Value);
+            response = response.Where(data => data.Value?.Results?.Count() > 0).ToDictionary(data => data.Key, data => data.Value);
 
             response.ForEach(data => resultDictionary.Add(data.Key, GetNetworkAgentDetails(data.Value)));
 

@@ -12,10 +12,14 @@ using Newtonsoft.Json;
 using System.Collections.Generic;
 using Microsoft.Rest.Serialization;
 using Newtonsoft.Json.Linq;
+using Microsoft.WindowsAzure.Commands.Utilities.Common;
+using System.Text;
+using Microsoft.Azure.Management.Internal.Resources.Models;
+using System.IO;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
-    [Cmdlet("New", AzureRMConstants.AzureRMPrefix + "AzureNetworkWatcherMigrateMmaToArc"), OutputType(typeof(PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor))]
+    [Cmdlet("New", AzureRMConstants.AzureRMPrefix + "AzureNetworkWatcherMigrateMmaToArc"), OutputType(typeof(List<string>))]
     public class NewAzureNetworkWatcherMigrateMmaToArcCommand : LaToAmaConnectionMonitorBaseCmdlet
     {
 
@@ -61,15 +65,16 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             if (MMAWorkspaceConnectionMonitors?.Count() >= 0)
             {
-                /*** var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
-                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "networkwatcher_westcentralus", "vakaranaWCUSCM1");
-                var cm1 = MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(cmcm);
-                MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 }; **/
-
-
                 var cmWithArmEndpoints = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
-                List<ConnectionMonitorResult> outputCMs = cmWithArmEndpoints?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
+                var migratedCMs = cmWithArmEndpoints.ConnectionMonitorsList;
+                List<ConnectionMonitorResult> outputCMs = migratedCMs?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
 
+                // Install NW agent in the arc machines if it's not already installed.
+                var arcMachineDetails = cmWithArmEndpoints.ArcGenericResources;
+                var scriptContent = GenerateScriptToInstallNWAgent(arcMachineDetails);
+
+                WriteScriptInLocation(scriptContent);
+                
                 if (outputCMs != null && outputCMs.Count > 0)
                 {
                     var cmListGrpByLocation = outputCMs.GroupBy(g => new SubscriptionRegionKey(g.Location, GetSubscriptionFromResourceId(g.Id))).Select(g => g.ToList()).ToList();
@@ -86,7 +91,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
                 else
                 {
-                    WriteInformation($" No Connection Monitor found.\n", new string[] { "PSHOST" });
+                    WriteInformation($" No Connection Monitor are being migrated.\n", new string[] { "PSHOST" });
                 }
             }
         }
@@ -150,6 +155,58 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             jo["name"] = string.Concat("networkwatcher_", cm.Location, "/", cm.Name);
             cmResultJson = jo.ToString(Formatting.None);
             return cmResultJson;
+        }
+
+        private string GenerateScriptToInstallNWAgent(IEnumerable<GenericResource> arcMachineDetails)
+        {
+            StringBuilder sb = new StringBuilder();
+            arcMachineDetails.ForEach(arcMachine =>
+            {
+                WriteInformation($"Arc Machine Details: {arcMachine.Name} - {arcMachine.Id} - {arcMachine.Type}\n", new string[] { "PSHOST" });
+                var properties = arcMachine.Properties as JObject;
+                var osType = properties["osType"].ToString();
+                string extensionType = string.Empty, extensionName = string.Empty;
+                if (osType.Equals("windows", StringComparison.OrdinalIgnoreCase))
+                {
+                    extensionType = "NetworkWatcherAgentWindows";
+                    extensionName = "NetworkWatcherAgentWindows";
+                }
+                else
+                {
+                    extensionName = "NetworkWatcherAgentLinux";
+                    extensionType = "NetworkWatcherAgentLinux";
+                }
+
+                var extensionId = arcMachine.Id + "/extensions/" + extensionType;
+                var extensionDetails = GetResourcesById(new List<string>() { extensionId });
+                var extension = extensionDetails?.FirstOrDefault();
+                var pp = extension?.Properties as JObject;
+                var priovisioningState = pp?["provisioningState"].ToString();
+                if (string.IsNullOrEmpty(priovisioningState) || !priovisioningState.Equals("Succeeded", StringComparison.OrdinalIgnoreCase))
+                {
+                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -TypeHandlerVersion 1.4.2573.1 -ExtensionType {extensionType}";
+
+                    sb.AppendLine(commandToInstallNW);
+                }
+                ////  New-AzConnectedMachineExtension -Name NetworkWatcherAgentLinux -ResourceGroupName rgName -MachineName machineName -Location eastus -Publisher "Microsoft.Azure.NetworkWatcher" -TypeHandlerVersion 1.4.2573.1 -ExtensionType NetworkWatcherAgentLinux
+            });
+
+            return sb.ToString();
+        }
+
+        private void WriteScriptInLocation(string scriptContent)
+        {
+            var parentFolder = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            string scriptFolder = Path.Combine(parentFolder, "NWAgentInstallScript");
+            if (!Directory.Exists(scriptFolder))
+            {
+                Directory.CreateDirectory(scriptFolder);
+            }
+
+            string scriptFileName = "NWAgentInstallScript_" + DateTime.Now.ToString("yyyy-MM-dd-hh-mm") + ".ps1";
+            string scriptFile = Path.Combine(scriptFolder, scriptFileName);
+            File.WriteAllText(scriptFile, scriptContent);
+            WriteInformation($"Script file is created at location: {scriptFile}\n", new string[] { "PSHOST" });
         }
     }
 }
