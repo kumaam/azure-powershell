@@ -196,6 +196,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
         private void WriteScriptInLocation(string scriptContent)
         {
+            if (string.IsNullOrEmpty(scriptContent))
+            {
+                return;
+            }
+
             var parentFolder = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
             string scriptFolder = Path.Combine(parentFolder, "NWAgentInstallScript");
             if (!Directory.Exists(scriptFolder))
@@ -206,7 +211,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             string scriptFileName = "NWAgentInstallScript_" + DateTime.Now.ToString("yyyy-MM-dd-hh-mm") + ".ps1";
             string scriptFile = Path.Combine(scriptFolder, scriptFileName);
             File.WriteAllText(scriptFile, scriptContent);
-            WriteInformation($"Script file is created at location: {scriptFile}\n", new string[] { "PSHOST" });
+            WriteInformation($"Script file to install NW Extension in ARC machines is located at : {scriptFile}\n", new string[] { "PSHOST" });
         }
     }
 }
