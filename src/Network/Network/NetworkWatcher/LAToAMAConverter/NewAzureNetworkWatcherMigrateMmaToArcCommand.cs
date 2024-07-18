@@ -184,7 +184,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 var priovisioningState = pp?["provisioningState"].ToString();
                 if (string.IsNullOrEmpty(priovisioningState) || !priovisioningState.Equals("Succeeded", StringComparison.OrdinalIgnoreCase))
                 {
-                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -TypeHandlerVersion 1.4.2573.1 -ExtensionType {extensionType}";
+                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -TypeHandlerVersion 1.4.3320.1 -ExtensionType {extensionType}";
 
                     sb.AppendLine(commandToInstallNW);
                 }
