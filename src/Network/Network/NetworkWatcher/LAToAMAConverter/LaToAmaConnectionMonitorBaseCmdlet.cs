@@ -70,27 +70,13 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
         protected async Task<string> GetArcExtensions(string subscriptionId, string rgName, string resourceName, IProfileOperations profile, IAzureTokenCache iCache)
         {
-            string url = string.Format(@"https://management.azure.com/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.HybridCompute/machines/{2}/extensions?api-version=2022-12-27", subscriptionId, rgName, resourceName);
+            string url = string.Format(@"https://management.azure.com/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.HybridCompute/machines/{2}/extensions?api-version=2024-07-10", subscriptionId, rgName, resourceName);
             try
             {
                 HttpRequestMessage httpRequestMessage = new HttpRequestMessage(HttpMethod.Get, url);
-                var tenantId = DefaultContext.Tenant.Id;
-                IAzureAccount account = profile.DefaultContext.Account;
-                IAzureEnvironment environment = profile.DefaultContext.Environment;
-                SecureString password = null;
-                string promptBehavior = ShowDialog.Never;
-                IAccessToken accessToken = null;
-                try
-                {
-                    accessToken = AcquireAccessToken(account, environment, tenantId, password, promptBehavior, null, iCache);
-                }
-                catch (Exception ex)
-                {
-                    WriteInformation($"failed to fetch for token to get arc machine extensions with exception {ex}", new string[] { "PSHOST" });
-                    return string.Empty;
-                }
+                string token = FetchToken(profile, iCache);
 
-                httpRequestMessage.Headers.Add("Authorization", "Bearer " + accessToken.AccessToken);
+                httpRequestMessage.Headers.Add("Authorization", "Bearer " + token);
                 var response = await ArmClient.HttpClient.SendAsync(httpRequestMessage);
                 if (response?.StatusCode != HttpStatusCode.OK)
                 {
@@ -105,6 +91,52 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 WriteInformation($"failed to fetch for url {url} , exception {ex}", new string[] { "PSHOST" });
                 return string.Empty;
             }
+        }
+
+        protected async Task<bool> GetLASolution(string subscriptionId, string rgName, string resourceName, IProfileOperations profile, IAzureTokenCache iCache)
+        {
+            string url = string.Format(@"https://management.azure.com/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.OperationsManagement/solutions/NetworkMonitoring({2})?api-version=2015-11-01-preview", subscriptionId, rgName, resourceName);
+            try
+            {
+                HttpRequestMessage httpRequestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+                string token = FetchToken(profile, iCache);
+
+                httpRequestMessage.Headers.Add("Authorization", "Bearer " + token);
+                var response = await ArmClient.HttpClient.SendAsync(httpRequestMessage);
+                if (response?.StatusCode != HttpStatusCode.OK)
+                {
+                    WriteInformation($"failed to fetch for url {url} , errorcode {response.StatusCode}", new string[] { "PSHOST" });
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                WriteInformation($"failed to fetch for url {url} , exception {ex}", new string[] { "PSHOST" });
+                return false;
+            }
+        }
+
+        private string FetchToken(IProfileOperations profile, IAzureTokenCache iCache)
+        {
+            var tenantId = DefaultContext.Tenant.Id;
+            IAzureAccount account = profile.DefaultContext.Account;
+            IAzureEnvironment environment = profile.DefaultContext.Environment;
+            SecureString password = null;
+            string promptBehavior = ShowDialog.Never;
+            IAccessToken accessToken = null;
+            try
+            {
+                accessToken = AcquireAccessToken(account, environment, tenantId, password, promptBehavior, null, iCache);
+            }
+            catch (Exception ex)
+            {
+                WriteInformation($"failed to fetch for token to get arc machine extensions with exception {ex}", new string[] { "PSHOST" });
+                return string.Empty;
+            }
+
+            return accessToken.AccessToken;
         }
 
         protected IEnumerable<AzureSubscription> GetAllSubscriptionsByUserContext(IProfileOperations profile, IAzureTokenCache cache)
@@ -411,10 +443,9 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         /// Get All the CMs which has MMAWorkspaceMachine as endpoint
         /// </summary>
         /// <param name="connectionMonitors">Basic details of CM like id, name , location, type</param>
-        /// <param name="endpointType">endpointType = MMAWorkspaceMachine</param>
         /// <param name="workSpaceId">work space Id</param>
         /// <returns>collection of connection monitor results</returns>
-        protected async Task<List<ConnectionMonitorResult>> GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(IEnumerable<GenericResource> connectionMonitors, string endpointType, string workSpaceId = null)
+        protected async Task<List<ConnectionMonitorResult>> GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(IEnumerable<GenericResource> connectionMonitors, string workSpaceId = null)
         {
             List<Task<ConnectionMonitorResult>> listCM = new List<Task<ConnectionMonitorResult>>();
             foreach (var cm in connectionMonitors)
@@ -433,13 +464,17 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             // if we remove workspace id as mandatory param
             if (workSpaceId != null)
             {
-                return listConnectionMonitorResult?.Where(w => w.Endpoints?.Any(a => a.Type?.Equals(endpointType, StringComparison.OrdinalIgnoreCase) == true
-                && a.ResourceId?.Equals(workSpaceId, StringComparison.OrdinalIgnoreCase) == true) == true).ToList();
+                return listConnectionMonitorResult?.Where(w => w.Endpoints?.Any(
+                    a => (a.Type?.Equals(EndpointType.MMAWorkspaceMachine, StringComparison.OrdinalIgnoreCase) == true ||
+                          a.Type?.Equals(EndpointType.MMAWorkspaceNetwork, StringComparison.OrdinalIgnoreCase) == true)
+                    && a.ResourceId?.Equals(workSpaceId, StringComparison.OrdinalIgnoreCase) == true) == true).ToList();
             }
             else
             {
                 return listConnectionMonitorResult
-                .Where(w => w.Endpoints?.Any(a => a.Type?.Equals(endpointType, StringComparison.OrdinalIgnoreCase) == true) == true).ToList();
+                .Where(w => w.Endpoints?.Any(
+                    a => a.Type?.Equals(EndpointType.MMAWorkspaceMachine, StringComparison.OrdinalIgnoreCase) == true || 
+                         a.Type?.Equals(EndpointType.MMAWorkspaceNetwork, StringComparison.OrdinalIgnoreCase) == true) == true).ToList();
             }
         }
 
@@ -468,7 +503,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             Dictionary<string, string> arcMachineToRegion = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            IEnumerable<GenericResource> arcGenericResources = GetResourcesById(arcMachines);
+            IEnumerable<GenericResource> arcGenericResources = GetResourcesById(arcMachines, "2022-12-27");
             arcGenericResources.ToList().ForEach(arcMachine =>
             {
                 arcMachineToRegion.Add(arcMachine.Id, arcMachine.Location);
@@ -828,7 +863,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             newCM.TestGroups = newCM.TestGroups.Except(tgsToRemove).ToList();
         }
 
-        protected IEnumerable<GenericResource> GetResourcesById(IEnumerable<string> resourceIds)
+        protected IEnumerable<GenericResource> GetResourcesById(IEnumerable<string> resourceIds, string apiVersion = "2023-09-01")
         {
             List<GenericResource> genericResources = new List<GenericResource>();
             Parallel.ForEach(resourceIds, id =>
@@ -836,7 +871,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 //Need to check API Version
                 try
                 {
-                    GenericResource resourceData = ArmClient.Resources.GetById(id, "2022-12-27");
+                    GenericResource resourceData = ArmClient.Resources.GetById(id, apiVersion);
                     if (resourceData != null)
                         genericResources.Add(resourceData);
                 }

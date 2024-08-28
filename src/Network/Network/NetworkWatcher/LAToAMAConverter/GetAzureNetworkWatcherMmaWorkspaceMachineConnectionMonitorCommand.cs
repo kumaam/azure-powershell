@@ -69,17 +69,6 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             set;
         }
 
-        /// <summary>
-        /// Gets or sets the CM Endpoint Type MMAWorkspaceNetwork or MMAWorkspaceMachine
-        /// </summary>sub
-        [Parameter(Mandatory = false, Position = 0, ValueFromPipelineByPropertyName = true, HelpMessage = "CMEndpointType, fetch only those CM resources has matched endpoint type")]
-        [AllowEmptyString]
-        public string CMEndpointType
-        {
-            get;
-            set;
-        }
-
         public override void Execute()
         {
             base.Execute();
@@ -112,12 +101,8 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             }
 
             IEnumerable<GenericResource> allCMs = GetConnectionMonitorBySubscriptions(subscriptionIds, this.Region);
-            if (string.IsNullOrEmpty(this.CMEndpointType))
-            {
-                this.CMEndpointType = CommonConstants.MMAWorkspaceMachineEndpointResourceType;
-            }
 
-            List<ConnectionMonitorResult> allCmHasMMAWorkspaceMachine = GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(allCMs, this.CMEndpointType, this.WorkSpaceId)?.GetAwaiter().GetResult();
+            List<ConnectionMonitorResult> allCmHasMMAWorkspaceMachine = GetConnectionMonitorHasMMAWorkspaceMachineEndpoint(allCMs, this.WorkSpaceId)?.GetAwaiter().GetResult();
 
             if (allCmHasMMAWorkspaceMachine?.Count() > 0)
             {

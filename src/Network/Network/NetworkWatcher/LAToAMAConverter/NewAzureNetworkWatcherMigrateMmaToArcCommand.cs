@@ -27,25 +27,6 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         private IAzureTokenCache _cache;
         private IProfileOperations _profile;
 
-        /// <summary>
-        /// Gets or sets the query.
-        /// </summary>sub
-        [Parameter(Mandatory = false, Position = 0, ValueFromPipelineByPropertyName = true, HelpMessage = "Resource Graph query")]
-        [AllowEmptyString]
-        public string Query
-        {
-            get;
-            set;
-        }
-
-        [Parameter(Mandatory = false, ParameterSetName = CommonConstants.ParamSetNameByWorkspaceId, HelpMessage = "The workspace ID.")]
-        [ValidateNotNullOrEmpty]
-        public string WorkspaceId { get; set; }
-
-        [Parameter(Mandatory = false, HelpMessage = "The timespan to bound the query by, pass any number in hours.")]
-        public int TimespanInHrs { get; set; }
-
-
         [Parameter(Mandatory = true, HelpMessage = "List of MMA machine connection monitor.")]
         [ValidateNotNullOrEmpty]
         public PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] MMAWorkspaceConnectionMonitors { get; set; }
@@ -75,12 +56,6 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 var migratedCMs = cmWithArmEndpoints.ConnectionMonitorsList;
                 List<ConnectionMonitorResult> outputCMs = migratedCMs?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
 
-                // Install NW agent in the arc machines if it's not already installed.
-                var arcMachineDetails = cmWithArmEndpoints.ArcGenericResources;
-                var scriptContent = GenerateScriptToInstallNWAgent(arcMachineDetails);
-
-                WriteScriptInLocation(scriptContent);
-                
                 if (outputCMs != null && outputCMs.Count > 0)
                 {
                     var cmListGrpByLocation = outputCMs.GroupBy(g => new SubscriptionRegionKey(g.Location, GetSubscriptionFromResourceId(g.Id))).Select(g => g.ToList()).ToList();
@@ -94,6 +69,15 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
                     WriteInformation($"CM List with Migrated LA to AMA endpoints----\n", new string[] { "PSHOST" });
                     WriteObject(outputTemplate);
+
+                    // Install NW agent in the arc machines if it's not already installed.
+                    var arcMachineDetails = cmWithArmEndpoints.ArcGenericResources;
+                    var scriptContent = GenerateScriptToInstallNWAgent(arcMachineDetails);
+                    WriteScriptInLocation(scriptContent);
+
+                    // Script to enable NPM solution for output workspaceIds.
+                    var outputWorkspaceIds = migratedCMs.Select(cm => cm.Outputs.FirstOrDefault()?.WorkspaceSettings?.WorkspaceResourceId).Distinct().ToList();
+                    NPMSolutionEnablementScript(outputWorkspaceIds);
                 }
                 else
                 {
@@ -186,7 +170,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
 
                 bool isExtensionInstalled = CheckIfExtensionsInstalled(arcMachine, extensionType).GetAwaiter().GetResult();
-                if (isExtensionInstalled)
+                if (!isExtensionInstalled)
                 {
                     string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -ExtensionType {extensionType}";
 
@@ -206,7 +190,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 }
 
                 isExtensionInstalled = CheckIfExtensionsInstalled(arcMachine, extensionType).GetAwaiter().GetResult();
-                if (isExtensionInstalled)
+                if (!isExtensionInstalled)
                 {
                     string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.Monitor\" -ExtensionType {extensionType}";
 
@@ -222,7 +206,7 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
         {
             try
             {
-                string data = await GetArcExtensions(GetSubscriptionFromResourceId(arcMachine.Id), arcMachine.ResourceGroupName, arcMachine.Name, _profile, _cache);
+                string data = await GetArcExtensions(GetSubscriptionFromResourceId(arcMachine.Id), GetResourceGroupNameFromResourceId(arcMachine.Id), arcMachine.Name, _profile, _cache);
                 JObject jObj = JObject.Parse(data);
                 JArray jArray = jObj["value"].ToObject<JArray>();
                 JToken jToken = jArray.Where(j => extensionType.Equals(j["properties"]["type"].ToString())).FirstOrDefault();
@@ -261,6 +245,48 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             string scriptFile = Path.Combine(scriptFolder, scriptFileName);
             File.WriteAllText(scriptFile, scriptContent);
             WriteInformation($"Script file to install NW Extension in ARC machines is located at : {scriptFile}\n", new string[] { "PSHOST" });
+        }
+
+        private void NPMSolutionEnablementScript(List<String> outputWorkspaceIds)
+        {
+            if (!outputWorkspaceIds.Any())
+            {
+                return;
+            }
+
+            IEnumerable<GenericResource> genericResources = GetResourcesById(outputWorkspaceIds);
+            StringBuilder sb = new StringBuilder();
+
+            foreach (GenericResource laWorkspace in genericResources)
+            {
+                if (GetLASolution(GetSubscriptionFromResourceId(laWorkspace.Id), GetResourceGroupNameFromResourceId(laWorkspace.Id), laWorkspace.Name, _profile, _cache).GetAwaiter().GetResult())
+                {
+                   continue;
+                }
+
+                string commandToEnableNPMSolution = $"New-AzMonitorLogAnalyticsSolution -Type NetworkMonitoring -ResourceGroupName {GetResourceGroupNameFromResourceId(laWorkspace.Id)} -Location {laWorkspace.Location} -WorkspaceResourceId {laWorkspace.Id}";
+
+                sb.AppendLine(commandToEnableNPMSolution);
+            }
+
+            if (string.IsNullOrEmpty(sb.ToString()))
+            {
+                return;
+            }
+
+            var parentFolder = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            string scriptFolder = Path.Combine(parentFolder, "EnableNPMSolutionScript");
+            if (!Directory.Exists(scriptFolder))
+            {
+                Directory.CreateDirectory(scriptFolder);
+            }
+
+            string scriptFileName = "EnableNPMSolutionScript_" + DateTime.Now.ToString("yyyy-MM-dd-hh-mm") + ".ps1";
+            string scriptFile = Path.Combine(scriptFolder, scriptFileName);
+
+            File.WriteAllText(scriptFile, sb.ToString());
+
+            WriteInformation($"Script file to Enable NPM extension in ARC machines is located at : {scriptFile}\n", new string[] { "PSHOST" });
         }
     }
 }
