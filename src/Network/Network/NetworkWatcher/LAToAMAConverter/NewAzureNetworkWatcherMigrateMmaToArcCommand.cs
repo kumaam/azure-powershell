@@ -16,6 +16,7 @@ using Microsoft.WindowsAzure.Commands.Utilities.Common;
 using System.Text;
 using Microsoft.Azure.Management.Internal.Resources.Models;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
@@ -65,6 +66,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 
             if (MMAWorkspaceConnectionMonitors?.Count() >= 0)
             {
+                /*** var cmWithArmEndpoints = MigrateCMs(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
+                var cmcm = GetConnectionMonitorResult("networkwatcherrg", "networkwatcher_westcentralus", "vakaranaWCUSCM1");
+                var cm1 = MapConnectionMonitorResultToPSMmaWorkspaceMachineConnectionMonitor(cmcm);
+                MMAWorkspaceConnectionMonitors = new PSNetworkWatcherMmaWorkspaceMachineConnectionMonitor[] { cm1 }; **/
+
                 var cmWithArmEndpoints = MigrateCM(MMAWorkspaceConnectionMonitors).GetAwaiter().GetResult();
                 var migratedCMs = cmWithArmEndpoints.ConnectionMonitorsList;
                 List<ConnectionMonitorResult> outputCMs = migratedCMs?.Select(cm => MapPSMmaWorkspaceMachineConnectionMonitorToConnectionMonitorResult(cm))?.ToList();
@@ -166,6 +172,8 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                 var properties = arcMachine.Properties as JObject;
                 var osType = properties["osType"].ToString();
                 string extensionType = string.Empty, extensionName = string.Empty;
+
+                //// Validate if NW extension in installed in ARC machien or not.
                 if (osType.Equals("windows", StringComparison.OrdinalIgnoreCase))
                 {
                     extensionType = "NetworkWatcherAgentWindows";
@@ -177,21 +185,62 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                     extensionType = "NetworkWatcherAgentLinux";
                 }
 
-                var extensionId = arcMachine.Id + "/extensions/" + extensionType;
-                var extensionDetails = GetResourcesById(new List<string>() { extensionId });
-                var extension = extensionDetails?.FirstOrDefault();
-                var pp = extension?.Properties as JObject;
-                var priovisioningState = pp?["provisioningState"].ToString();
-                if (string.IsNullOrEmpty(priovisioningState) || !priovisioningState.Equals("Succeeded", StringComparison.OrdinalIgnoreCase))
+                bool isExtensionInstalled = CheckIfExtensionsInstalled(arcMachine, extensionType).GetAwaiter().GetResult();
+                if (isExtensionInstalled)
                 {
-                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -TypeHandlerVersion 1.4.3320.1 -ExtensionType {extensionType}";
+                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.NetworkWatcher\" -ExtensionType {extensionType}";
 
                     sb.AppendLine(commandToInstallNW);
                 }
-                ////  New-AzConnectedMachineExtension -Name NetworkWatcherAgentLinux -ResourceGroupName rgName -MachineName machineName -Location eastus -Publisher "Microsoft.Azure.NetworkWatcher" -TypeHandlerVersion 1.4.2573.1 -ExtensionType NetworkWatcherAgentLinux
+
+                //// Validate if AMA extension in installed in ARC machien or not.
+                if (osType.Equals("windows", StringComparison.OrdinalIgnoreCase))
+                {
+                    extensionType = "AzureMonitorWindowsAgent";
+                    extensionName = "AzureMonitorWindowsAgent";
+                }
+                else
+                {
+                    extensionName = "AzureMonitorLinuxAgent";
+                    extensionType = "AzureMonitorLinuxAgent";
+                }
+
+                isExtensionInstalled = CheckIfExtensionsInstalled(arcMachine, extensionType).GetAwaiter().GetResult();
+                if (isExtensionInstalled)
+                {
+                    string commandToInstallNW = $"New-AzConnectedMachineExtension -Name {extensionName} -ResourceGroupName {GetResourceGroupNameFromResourceId(arcMachine.Id)} -MachineName {arcMachine.Name} -Location {arcMachine.Location} -Publisher \"Microsoft.Azure.Monitor\" -ExtensionType {extensionType}";
+
+                    sb.AppendLine(commandToInstallNW);
+                }
+
             });
 
             return sb.ToString();
+        }
+
+        private async Task<bool> CheckIfExtensionsInstalled(GenericResource arcMachine, string extensionType)
+        {
+            try
+            {
+                string data = await GetArcExtensions(GetSubscriptionFromResourceId(arcMachine.Id), arcMachine.ResourceGroupName, arcMachine.Name, _profile, _cache);
+                JObject jObj = JObject.Parse(data);
+                JArray jArray = jObj["value"].ToObject<JArray>();
+                JToken jToken = jArray.Where(j => extensionType.Equals(j["properties"]["type"].ToString())).FirstOrDefault();
+                if (jToken != null)
+                {
+                    string provisioningState = jToken["properties"]["provisioningState"].ToString();
+                    if (provisioningState.Equals("Succeeded"))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteInformation($"Error while checking if extension is installed in ARC machine: {arcMachine.Name} - {ex.Message}\n", new string[] { "PSHOST" });
+            }
+
+            return false;
         }
 
         private void WriteScriptInLocation(string scriptContent)

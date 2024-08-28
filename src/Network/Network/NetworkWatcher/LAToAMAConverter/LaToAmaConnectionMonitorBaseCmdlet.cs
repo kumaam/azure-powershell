@@ -41,6 +41,10 @@ using Microsoft.WindowsAzure.Commands.Utilities.Common;
 using Microsoft.Azure.Commands.Common.Strategies;
 using Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter.ArrayExtensions;
 using System.Reflection;
+using System.Net.Http;
+using AutoMapper;
+using Microsoft.Azure.Commands.Common.Authentication.Models;
+using Microsoft.Extensions.Logging;
 
 namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
 {
@@ -61,6 +65,45 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
             set
             {
                 this._armClient = value;
+            }
+        }
+
+        protected async Task<string> GetArcExtensions(string subscriptionId, string rgName, string resourceName, IProfileOperations profile, IAzureTokenCache iCache)
+        {
+            string url = string.Format(@"https://management.azure.com/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.HybridCompute/machines/{2}/extensions?api-version=2022-12-27", subscriptionId, rgName, resourceName);
+            try
+            {
+                HttpRequestMessage httpRequestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+                var tenantId = DefaultContext.Tenant.Id;
+                IAzureAccount account = profile.DefaultContext.Account;
+                IAzureEnvironment environment = profile.DefaultContext.Environment;
+                SecureString password = null;
+                string promptBehavior = ShowDialog.Never;
+                IAccessToken accessToken = null;
+                try
+                {
+                    accessToken = AcquireAccessToken(account, environment, tenantId, password, promptBehavior, null, iCache);
+                }
+                catch (Exception ex)
+                {
+                    WriteInformation($"failed to fetch for token to get arc machine extensions with exception {ex}", new string[] { "PSHOST" });
+                    return string.Empty;
+                }
+
+                httpRequestMessage.Headers.Add("Authorization", "Bearer " + accessToken.AccessToken);
+                var response = await ArmClient.HttpClient.SendAsync(httpRequestMessage);
+                if (response?.StatusCode != HttpStatusCode.OK)
+                {
+                    WriteInformation($"failed to fetch for url {url} , errorcode {response.StatusCode}", new string[] { "PSHOST" });
+                    return string.Empty;
+                }
+                string res = await response.Content.ReadAsStringAsync();
+                return res;
+            }
+            catch (Exception ex)
+            {
+                WriteInformation($"failed to fetch for url {url} , exception {ex}", new string[] { "PSHOST" });
+                return string.Empty;
             }
         }
 
