@@ -737,7 +737,11 @@ namespace Microsoft.Azure.Commands.Network.NetworkWatcher.LAToAMAConverter
                         EndpointsCleanup(newCM);
                         TestGroupsCleanup(newCM);
 
-                        updatedCMs.Add(newCM);
+                        if (newCM.TestGroups.Any() && newCM.Endpoints.Any())
+                        {
+                            updatedCMs.Add(newCM);
+                        }
+
                         sameCM = false;
                     });
                 }
